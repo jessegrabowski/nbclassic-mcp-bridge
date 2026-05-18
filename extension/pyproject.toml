@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nbclassic-mcp-bridge"
+description = "nbclassic frontend extension + relay server extension bridging the classic Notebook to an MCP server"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jesse Grabowski", email = "jessegrabowski@gmail.com" }]
+keywords = ["jupyter", "notebook", "nbclassic", "mcp", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Jupyter",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = ["jupyter-server>=2"]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/jessegrabowski/nbclassic-mcp-bridge"
+Repository = "https://github.com/jessegrabowski/nbclassic-mcp-bridge"
+Issues = "https://github.com/jessegrabowski/nbclassic-mcp-bridge/issues"
+
+[project.optional-dependencies]
+test = ["pytest", "playwright", "nbclassic"]
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = ".." }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["e2e: end-to-end browser test; needs playwright + chromium (deselect with -m 'not e2e')"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nbclassic_mcp_bridge"]
+
+# Drop the server- and frontend-extension config into the Jupyter data dirs,
+# and the nbextension JS where nbclassic serves it, so a plain pip install
+# enables both halves with no jupyter nbextension/serverextension command.
+[tool.hatch.build.targets.wheel.shared-data]
+"jupyter-config/jupyter_server_config.d/nbclassic_mcp_bridge.json" = "etc/jupyter/jupyter_server_config.d/nbclassic_mcp_bridge.json"
+"jupyter-config/notebook.d/nbclassic_mcp_bridge.json" = "etc/jupyter/nbconfig/notebook.d/nbclassic_mcp_bridge.json"
+"static" = "share/jupyter/nbextensions/nbclassic_mcp_bridge"

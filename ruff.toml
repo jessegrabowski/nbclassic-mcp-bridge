@@ -1,0 +1,16 @@
+line-length = 120
+target-version = "py312"
+
+[format]
+docstring-code-format = true
+
+[lint]
+select = ["C", "E", "F", "I", "UP", "W", "RUF", "PERF", "PTH", "ISC", "T20"]
+ignore = ["C408", "C901", "E501", "E741", "RUF012", "PERF203", "ISC001"]
+
+[lint.isort]
+lines-after-imports = 2
+known-first-party = ["nbclassic_mcp_bridge", "nbclassic_mcp_bridge_mcp"]
+
+[lint.per-file-ignores]
+"**/__init__.py" = ["F401", "E402", "F403"]

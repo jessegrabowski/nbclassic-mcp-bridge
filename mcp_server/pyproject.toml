@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nbclassic-mcp-bridge-mcp"
+description = "MCP server that drives a classic Notebook through the nbclassic-mcp-bridge relay"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jesse Grabowski", email = "jessegrabowski@gmail.com" }]
+keywords = ["jupyter", "notebook", "nbclassic", "mcp", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Jupyter",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = ["mcp>=1.0", "websockets>=12"]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/jessegrabowski/nbclassic-mcp-bridge"
+Repository = "https://github.com/jessegrabowski/nbclassic-mcp-bridge"
+Issues = "https://github.com/jessegrabowski/nbclassic-mcp-bridge/issues"
+
+[project.scripts]
+nbclassic-mcp-bridge = "nbclassic_mcp_bridge_mcp.server:main"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { root = ".." }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nbclassic_mcp_bridge_mcp"]

@@ -1,0 +1,5 @@
+{
+  "load_extensions": {
+    "nbclassic_mcp_bridge/main": true
+  }
+}
