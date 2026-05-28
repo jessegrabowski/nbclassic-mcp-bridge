@@ -99,7 +99,7 @@ define([
         }
         case "set_source": {
             if (args.cell_id === focusedCellId) {
-                return { cell_id: args.cell_id, skipped: true };
+                return { cell_id: args.cell_id, status: "skipped", reason: "focused" };
             }
             var edited = requireCell(args.cell_id);
             // set_text drops a rendered markdown cell back to its raw source;
@@ -107,7 +107,7 @@ define([
             var wasRendered = edited.rendered;
             edited.set_text(args.source || "");
             if (wasRendered) { edited.render(); }
-            return { cell_id: args.cell_id };
+            return { cell_id: args.cell_id, status: "written" };
         }
         case "delete_cell": {
             var deleteIndex = indexById(args.cell_id);

@@ -162,7 +162,14 @@ async def insert_cell(index: int, cell_type: str, source: str) -> dict:
 
 @mcp.tool()
 async def set_cell_source(cell_id: str, source: str) -> dict:
-    """Replace a cell's source. Skipped if the human currently has that cell focused."""
+    """Replace a cell's source.
+
+    Returns ``{"cell_id": ..., "status": "written"}`` on success. If the
+    human is currently focused on the target cell the write is skipped to
+    avoid clobbering an in-progress edit, and the return is
+    ``{"cell_id": ..., "status": "skipped", "reason": "focused"}`` — the
+    caller should check ``status`` before assuming the write took effect.
+    """
     return await _relay.command("set_source", {"cell_id": cell_id, "source": source})
 
 
