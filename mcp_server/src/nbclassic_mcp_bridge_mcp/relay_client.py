@@ -83,6 +83,16 @@ class RelayClient:
             self._ws = None
         self._fail_pending(ConnectionError("relay connection closed"))
 
+    async def retarget(self, jupyter_url: str, token: str) -> None:
+        """Point at a different Jupyter server; drops any current connection.
+
+        The next ``connect`` opens the relay socket against the new endpoint.
+        """
+        await self.close()
+        self._jupyter_url = jupyter_url
+        self._token = token
+        self._notebook = None
+
     async def command(self, op: str, args: dict) -> dict:
         """Send a ``cmd`` and return the ``result`` of the matching ``reply``.
 

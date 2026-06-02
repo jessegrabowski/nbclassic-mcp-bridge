@@ -2,10 +2,26 @@ from nbclassic_mcp_bridge_mcp.server import (
     _cell_output_view,
     _cell_source_view,
     _clean_output,
+    _derive_endpoint,
     _outline_cell,
     _summarize_output,
     _truncate,
 )
+
+
+def test_derive_endpoint_matches_jupyter_project_env_sh():
+    # Vector independently reproduced from the shell script's sha256 scheme.
+    url, token = _derive_endpoint("/home/user/project")
+    assert url == "http://localhost:10365"
+    assert token == "08b0b11cbcd860257e8bdfa6b8e5f017"
+
+
+def test_derive_endpoint_is_deterministic_and_in_range():
+    first = _derive_endpoint("/some/path")
+    assert _derive_endpoint("/some/path") == first
+    port = int(first[0].rsplit(":", 1)[1])
+    assert 10000 <= port < 30000
+    assert len(first[1]) == 32
 
 
 def test_truncate_respects_the_limit_and_leaves_short_text():

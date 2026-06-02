@@ -1,6 +1,8 @@
+import hashlib
 import logging
 import os
 import sys
+from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
@@ -117,11 +119,44 @@ def _cell_output_view(cell: dict, full: bool) -> dict:
     return {"cell_id": cell.get("cell_id"), "outputs": outputs}
 
 
+def _derive_endpoint(project_path: str) -> tuple[str, str]:
+    """Derive a project's Jupyter URL and token from its directory path.
+
+    Mirrors ``jupyter-project-env.sh``: ``sha256`` of the absolute path gives a
+    deterministic port (10000-29999) and 32-hex token, so this matches a server
+    started with ``launch-nb`` in that directory.
+    """
+    pwd = os.path.abspath(os.path.expanduser(project_path))
+    digest = hashlib.sha256(pwd.encode()).hexdigest()
+    port = 10000 + int(digest[:4], 16) % 20000
+    token = digest[8:40]
+    return f"http://localhost:{port}", token
+
+
 @mcp.tool()
 async def use_notebook(path: str) -> str:
     """Attach the bridge to a notebook open in the classic Notebook UI."""
     await _relay.connect(path)
     return f"attached to {path}"
+
+
+@mcp.tool()
+async def use_server(jupyter_url: str, token: str) -> str:
+    """Retarget the bridge at a different Jupyter server, then call use_notebook."""
+    await _relay.retarget(jupyter_url, token)
+    return f"relay target set to {jupyter_url}"
+
+
+@mcp.tool()
+async def use_project(path: str) -> str:
+    """Retarget the bridge at the launch-nb server for a project directory.
+
+    Derives port and token from ``path`` the way jupyter-project-env.sh does;
+    follow with use_notebook to attach to a notebook open on that server.
+    """
+    jupyter_url, token = _derive_endpoint(path)
+    await _relay.retarget(jupyter_url, token)
+    return f"relay target set to {jupyter_url} (derived from {path})"
 
 
 @mcp.tool()
