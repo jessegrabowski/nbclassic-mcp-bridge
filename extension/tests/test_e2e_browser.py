@@ -198,6 +198,38 @@ def test_mcp_commands_drive_the_live_notebook(nbclassic_port):
     asyncio.run(scenario())
 
 
+def test_a_second_tab_takes_over_and_the_first_stands_down(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
+                page1 = await browser.new_page()
+                await page1.goto(url)
+                await mcp.recv_until(_extension_joined)
+
+                page2 = await browser.new_page()
+                await page2.goto(url)
+                await mcp.recv_until(_extension_joined)
+
+                # The evicted tab must stand down rather than reconnect and evict us back; six quiet
+                # seconds (past several reconnect backoffs) proves there is no churn.
+                with pytest.raises(TimeoutError):
+                    await mcp.recv_until(lambda f: f.get("kind") == "status", timeout=6)
+                assert await mcp.command("snapshot", {}) is not None
+
+                # Returning to the first tab hands it the room back.
+                await page1.evaluate("window.dispatchEvent(new Event('focus'))")
+                await mcp.recv_until(_extension_joined, timeout=10)
+                assert await mcp.command("snapshot", {}) is not None
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_human_edits_surface_as_events(nbclassic_port):
     async def scenario():
         async with async_playwright() as pw:

@@ -13,11 +13,16 @@ define([
     var RECONNECT_MIN_MS = 2000;
     var RECONNECT_MAX_MS = 30000;
 
+    // Close reason the relay sends when another tab takes over this notebook's room; the evicted tab
+    // must stand down instead of reconnecting, or the two tabs evict each other forever.
+    var EVICTED_REASON = "replaced by a newer connection";
+
     // Sentinel: the op sends its own reply later (execute_cell), so applyCommand
     // must not reply for it.
     var DEFERRED = {};
 
     var ws = null;
+    var evicted = false;            // stood down after another tab took the room
     var reconnectDelay = RECONNECT_MIN_MS;
     var focusedCellId = null;       // cell the human is editing; drives the set_source skip
     var dirtyCells = {};            // cell_id -> true, awaiting a debounced source_changed
@@ -180,6 +185,7 @@ define([
     }
 
     function connect() {
+        evicted = false;
         ws = new WebSocket(relayUrl());
         ws.onopen = function () {
             reconnectDelay = RECONNECT_MIN_MS;
@@ -200,12 +206,30 @@ define([
             }
             if (msg.kind === "cmd") { applyCommand(msg); }
         };
-        ws.onclose = function () {
+        ws.onclose = function (ev) {
             ws = null;
+            if (ev && ev.code === 1001 && ev.reason === EVICTED_REASON) {
+                // Another tab owns the room now; reclaimEvicted takes it back if the human returns here.
+                evicted = true;
+                console.info("nbclassic-mcp-bridge: bridge moved to a newer tab of this notebook");
+                return;
+            }
+            if (ev && ev.code === 1002) {
+                // Handshake rejected (protocol mismatch); only a page refresh loads JS that could succeed.
+                console.error("nbclassic-mcp-bridge: relay rejected the connection ("
+                              + ev.reason + "); refresh the page to reload the extension");
+                return;
+            }
             setTimeout(connect, reconnectDelay);
             reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
         };
         ws.onerror = function () { /* onclose fires next; reconnect happens there */ };
+    }
+
+    // The tab the human works in should own the room: an evicted tab reclaims it on focus, and the tab
+    // it evicts stands down in turn.
+    function reclaimEvicted() {
+        if (evicted && ws === null) { connect(); }
     }
 
     // --- human-edit events -------------------------------------------------
@@ -255,10 +279,16 @@ define([
     function init() {
         connect();
         wireEvents();
+        window.addEventListener("focus", reclaimEvicted);
+        document.addEventListener("visibilitychange", function () {
+            if (!document.hidden) { reclaimEvicted(); }
+        });
     }
 
+    // Join only after the notebook finishes loading: an earlier snapshot would see a half-empty
+    // notebook, and the initial cell population would fire a cell_created event per seed cell.
     function load_ipython_extension() {
-        if (Jupyter.notebook) {
+        if (Jupyter.notebook && Jupyter.notebook._fully_loaded) {
             init();
         } else {
             events.one("notebook_loaded.Notebook", init);
