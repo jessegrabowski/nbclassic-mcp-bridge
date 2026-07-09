@@ -122,15 +122,13 @@ def _cell_output_view(cell: dict, full: bool) -> dict:
 def _derive_endpoint(project_path: str) -> tuple[str, str]:
     """Derive a project's Jupyter URL and token from its directory path.
 
-    Mirrors ``jupyter-project-env.sh``: ``sha256`` of the absolute path gives a
-    deterministic port (10000-29999) and 32-hex token, so this matches a server
-    started with ``launch-nb`` in that directory.
+    Mirrors ``nb-token``: the token is the full sha256 hex digest of the physical (symlink-resolved)
+    project path, which is what ``launch-nb`` sets as the server token. ``launch-nb`` serves on the
+    default port, so the URL is the configured ``JUPYTER_URL``.
     """
-    pwd = os.path.abspath(os.path.expanduser(project_path))
-    digest = hashlib.sha256(pwd.encode()).hexdigest()
-    port = 10000 + int(digest[:4], 16) % 20000
-    token = digest[8:40]
-    return f"http://localhost:{port}", token
+    pwd = Path(project_path).expanduser().resolve()
+    token = hashlib.sha256(str(pwd).encode()).hexdigest()
+    return _JUPYTER_URL, token
 
 
 @mcp.tool()
@@ -151,8 +149,8 @@ async def use_server(jupyter_url: str, token: str) -> str:
 async def use_project(path: str) -> str:
     """Retarget the bridge at the launch-nb server for a project directory.
 
-    Derives port and token from ``path`` the way jupyter-project-env.sh does;
-    follow with use_notebook to attach to a notebook open on that server.
+    Derives the token from ``path`` the way nb-token does; follow with
+    use_notebook to attach to a notebook open on that server.
     """
     jupyter_url, token = _derive_endpoint(path)
     await _relay.retarget(jupyter_url, token)

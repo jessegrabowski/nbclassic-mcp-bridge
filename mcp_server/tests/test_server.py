@@ -1,4 +1,7 @@
+import hashlib
+
 from nbclassic_mcp_bridge_mcp.server import (
+    _JUPYTER_URL,
     _cell_output_view,
     _cell_source_view,
     _clean_output,
@@ -9,19 +12,19 @@ from nbclassic_mcp_bridge_mcp.server import (
 )
 
 
-def test_derive_endpoint_matches_jupyter_project_env_sh():
-    # Vector independently reproduced from the shell script's sha256 scheme.
-    url, token = _derive_endpoint("/home/user/project")
-    assert url == "http://localhost:10365"
-    assert token == "08b0b11cbcd860257e8bdfa6b8e5f017"
+def test_derive_endpoint_matches_nb_token(tmp_path):
+    # nb-token hashes the physical path: sha256(`cd DIR && pwd -P`) as 64 hex chars.
+    url, token = _derive_endpoint(str(tmp_path))
+    assert url == _JUPYTER_URL
+    assert token == hashlib.sha256(str(tmp_path.resolve()).encode()).hexdigest()
 
 
-def test_derive_endpoint_is_deterministic_and_in_range():
-    first = _derive_endpoint("/some/path")
-    assert _derive_endpoint("/some/path") == first
-    port = int(first[0].rsplit(":", 1)[1])
-    assert 10000 <= port < 30000
-    assert len(first[1]) == 32
+def test_derive_endpoint_resolves_symlinks_like_nb_token(tmp_path):
+    real = tmp_path / "project"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert _derive_endpoint(str(link)) == _derive_endpoint(str(real))
 
 
 def test_truncate_respects_the_limit_and_leaves_short_text():
