@@ -329,9 +329,10 @@ async def poll_events(cursor: int = 0) -> dict:
 
     Pass 0 on the first call, then feed the returned ``cursor`` back to get only newer events. Each
     event is ``{name, data}`` -- one of cell_created, cell_deleted, cell_moved, cell_executed,
-    source_changed, focus_changed -- and reflects the human's actions only (your own commands are
-    not echoed back). Image payloads are omitted from cell_executed outputs; use
-    ``read_cell_image`` to view them.
+    source_changed, focus_changed, bridge_paused, bridge_resumed -- and reflects the human's
+    actions only (your own commands are not echoed back). While the human has the bridge paused,
+    every command fails with "bridge paused by the user" until a bridge_resumed event arrives.
+    Image payloads are omitted from cell_executed outputs; use ``read_cell_image`` to view them.
     """
     events, new_cursor = _relay.events_since(cursor)
     return _clean_event_outputs({"events": events, "cursor": new_cursor})

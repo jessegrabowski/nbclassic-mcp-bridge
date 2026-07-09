@@ -306,6 +306,58 @@ def test_a_second_tab_takes_over_and_the_first_stands_down(nbclassic_port):
     asyncio.run(scenario())
 
 
+def test_presence_ui_reflects_state_and_pause_blocks_commands(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
+                await page.goto(url)
+                await mcp.recv_until(_extension_joined)
+
+                # The toolbar control reports the assistant's presence.
+                await page.wait_for_selector("#mcp-bridge-status", timeout=15000)
+                await page.wait_for_function(
+                    "() => document.querySelector('#mcp-bridge-status').dataset.state === 'assistant'",
+                    timeout=10000,
+                )
+
+                # An agent edit flashes the touched cell.
+                cells = await mcp.command("snapshot", {})
+                await mcp.command("set_source", {"cell_id": cells[0]["cell_id"], "source": "print('flash')"})
+                flashed = await page.evaluate(
+                    "document.querySelectorAll('.cell')[0].classList.contains('mcp-bridge-agent-touch')"
+                )
+                assert flashed
+
+                # Pausing rejects commands, announces itself, and mutes human-edit events.
+                await page.click("#mcp-bridge-status button")
+                await mcp.recv_until(lambda f: f.get("kind") == "event" and f.get("name") == "bridge_paused")
+                paused_reply_id = mcp.send_cmd("snapshot", {})
+                rejected = await mcp.recv_until(
+                    lambda f: f.get("kind") == "reply" and f.get("id") == paused_reply_id, timeout=10
+                )
+                assert not rejected.get("ok") and "paused" in rejected.get("error", "")
+
+                await page.locator(".cell .CodeMirror").first.click()
+                await page.keyboard.type(" # while paused")
+                await page.keyboard.press("Escape")
+                muted = await mcp.drain_events(1.5)
+                assert muted == [], [event["name"] for event in muted]
+
+                # Resuming restores the bridge.
+                await page.click("#mcp-bridge-status button")
+                await mcp.recv_until(lambda f: f.get("kind") == "event" and f.get("name") == "bridge_resumed")
+                assert await mcp.command("snapshot", {}) is not None
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_human_edits_surface_as_events(nbclassic_port):
     async def scenario():
         async with async_playwright() as pw:

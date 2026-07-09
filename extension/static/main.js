@@ -1,9 +1,10 @@
 // nbclassic frontend extension: gives the nbclassic-mcp-bridge relay a live handle on Jupyter.notebook
 // so an MCP client can read/edit/run cells, and pushes the human's edits back so the assistant stays current.
 define([
+    "jquery",
     "base/js/namespace",
     "base/js/events",
-], function (Jupyter, events) {
+], function ($, Jupyter, events) {
     "use strict";
 
     var PROTOCOL_VERSION = 0;
@@ -21,6 +22,8 @@ define([
 
     var ws = null;
     var evicted = false;            // stood down after another tab took the room
+    var paused = false;             // human suspended the bridge; cmds rejected, no events emitted
+    var assistantConnected = false; // an mcp peer shares the room (tracked from status frames)
     var applying = false;           // an mcp command is mutating the notebook; suppress the event echo
     var pendingExecutes = {};       // cell_id -> true while an mcp execute_cell awaits its finish
     var reconnectDelay = RECONNECT_MIN_MS;
@@ -37,6 +40,7 @@ define([
     }
 
     function emit(name, data) {
+        if (paused) { return; }
         sendFrame({ kind: "event", name: name, data: data });
     }
 
@@ -84,6 +88,17 @@ define([
         lastAgentWrite[cell.id] = source;
     }
 
+    // Fading highlight on any cell the assistant touches, so its edits are visible as they land.
+    // The animation runs once and reverts by itself; the leftover class is inert, so no cleanup
+    // timer is needed (one would truncate a re-flash of the same cell).
+    function flashCell(cell) {
+        var element = cell.element;
+        if (!element || !element.length) { return; }
+        element.removeClass("mcp-bridge-agent-touch");
+        void element[0].offsetWidth; // restart the animation when the same cell is touched twice
+        element.addClass("mcp-bridge-agent-touch");
+    }
+
     // Payload-free description of one output; mirrors the MCP server's _summarize_output.
     function summarizeOutput(output) {
         var kind = output.output_type;
@@ -122,6 +137,10 @@ define([
     // it triggers fire synchronously inside it; the asynchronous cell_executed echo is handled by
     // pendingExecutes instead.
     function applyCommand(msg) {
+        if (paused) {
+            sendFrame({ kind: "reply", id: msg.id, ok: false, error: "bridge paused by the user" });
+            return;
+        }
         var reply = { kind: "reply", id: msg.id, ok: true };
         applying = true;
         try {
@@ -156,6 +175,7 @@ define([
             var created = nb.insert_cell_at_index(args.cell_type, args.index);
             if (!created) { throw new Error("could not insert a " + args.cell_type + " cell"); }
             writeAgentSource(created, args.source || "");
+            flashCell(created);
             return { cell_id: created.id, index: nb.find_cell_index(created) };
         }
         case "set_source": {
@@ -167,6 +187,7 @@ define([
             var wasRendered = edited.rendered;
             writeAgentSource(edited, args.source || "");
             if (wasRendered) { edited.render(); }
+            flashCell(edited);
             return { cell_id: args.cell_id, status: "written" };
         }
         case "delete_cell": {
@@ -200,12 +221,14 @@ define([
         lastAgentWrite[cellId] = moved.get_text();
         // The reinserted cell starts unrendered; keep the view it had.
         if (wasRendered) { moved.render(); }
+        flashCell(moved);
         return { cell_id: cellId, index: nb.find_cell_index(moved) };
     }
 
     // execute_cell replies later: the reply waits for finished_execute.CodeCell to carry real outputs.
     function executeCell(cellId, id, timeoutMs) {
         var cell = requireCell(cellId);
+        flashCell(cell);
         if (cell.cell_type !== "code") {
             cell.execute();
             sendFrame({ kind: "reply", id: id, ok: true,
@@ -251,6 +274,7 @@ define([
         ws = new WebSocket(relayUrl());
         ws.onopen = function () {
             reconnectDelay = RECONNECT_MIN_MS;
+            renderStatus();
             sendFrame({
                 kind: "hello",
                 protocol: PROTOCOL_VERSION,
@@ -267,9 +291,15 @@ define([
                 return;
             }
             if (msg.kind === "cmd") { applyCommand(msg); }
+            if (msg.kind === "status" && msg.peer === "mcp") {
+                assistantConnected = msg.state === "joined";
+                renderStatus();
+            }
         };
         ws.onclose = function (ev) {
             ws = null;
+            assistantConnected = false;
+            renderStatus();
             if (ev && ev.code === 1001 && ev.reason === EVICTED_REASON) {
                 // Another tab owns the room now; reclaimEvicted takes it back if the human returns here.
                 evicted = true;
@@ -355,6 +385,65 @@ define([
         });
     }
 
+    // One toolbar control doubles as the status light and the pause toggle. data-state carries the
+    // machine-readable state for styling and tests: assistant | ready | paused | disconnected.
+    var STATUS_UI = {
+        assistant:    { icon: "fa-plug", color: "#2e8540",
+                        title: "Assistant connected. Click to pause the bridge." },
+        ready:        { icon: "fa-plug", color: "#888",
+                        title: "Bridge ready; no assistant connected. Click to pause." },
+        paused:       { icon: "fa-pause", color: "#c77c11",
+                        title: "Bridge paused; assistant commands are rejected. Click to resume." },
+        disconnected: { icon: "fa-chain-broken", color: "#888",
+                        title: "Bridge not connected; another tab may own this notebook. Click to reconnect." },
+    };
+
+    function bridgeState() {
+        if (paused) { return "paused"; }
+        if (!ws || ws.readyState !== WebSocket.OPEN) { return "disconnected"; }
+        return assistantConnected ? "assistant" : "ready";
+    }
+
+    function renderStatus() {
+        var button = $("#mcp-bridge-status button");
+        if (!button.length) { return; }
+        var state = bridgeState();
+        var ui = STATUS_UI[state];
+        $("#mcp-bridge-status").attr("data-state", state);
+        button.attr("title", ui.title);
+        button.find("i").attr("class", "fa " + ui.icon).css("color", ui.color);
+    }
+
+    function setPaused(next) {
+        paused = next;
+        // Bypasses emit() on purpose: pause transitions must reach the assistant even though
+        // ordinary events are suppressed while paused.
+        sendFrame({ kind: "event", name: paused ? "bridge_paused" : "bridge_resumed", data: {} });
+        renderStatus();
+    }
+
+    function onStatusClick() {
+        if (!paused && ws === null) {
+            connect();
+            renderStatus();
+            return;
+        }
+        setPaused(!paused);
+    }
+
+    function buildStatusUI() {
+        $("<style>").text(
+            "@keyframes mcp-bridge-flash { from { background-color: rgba(66, 133, 244, 0.25); }" +
+            " to { background-color: transparent; } }" +
+            " .mcp-bridge-agent-touch { animation: mcp-bridge-flash 1.4s ease-out; }"
+        ).appendTo("head");
+        var button = $('<button class="btn btn-default"><i class="fa fa-plug"></i></button>');
+        button.on("click", onStatusClick);
+        $('<div class="btn-group" id="mcp-bridge-status"></div>').append(button)
+            .appendTo(Jupyter.toolbar.element);
+        renderStatus();
+    }
+
     // nbclassic moves cells by raw DOM reordering with no notebook event, so wrap the prototype's move
     // methods (toolbar, menu, and keyboard all funnel through them) and diff indices into cell_moved
     // events. The instance is sealed, hence the prototype; mcp move_cell uses delete+insert and never
@@ -385,6 +474,11 @@ define([
             patchMoves();
         } catch (e) {
             console.warn("nbclassic-mcp-bridge: could not hook cell moves; they will not be reported", e);
+        }
+        try {
+            buildStatusUI();
+        } catch (e) {
+            console.warn("nbclassic-mcp-bridge: could not build the toolbar status control", e);
         }
         window.addEventListener("focus", reclaimEvicted);
         document.addEventListener("visibilitychange", function () {
