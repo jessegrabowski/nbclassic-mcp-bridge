@@ -139,9 +139,18 @@ def _derive_endpoint(project_path: str) -> tuple[str, str]:
 
 @mcp.tool()
 async def use_notebook(path: str) -> str:
-    """Attach the bridge to a notebook open in the classic Notebook UI."""
+    """Attach the bridge to a notebook open in the classic Notebook UI.
+
+    Say whether the notebook's browser tab is connected: commands only work once the human has the
+    notebook open (with the same path the server reports for it).
+    """
     await _relay.connect(path)
-    return f"attached to {path}"
+    if await _relay.extension_present():
+        return f"attached to {path} (browser tab connected)"
+    return (
+        f"attached to {path}, but no browser tab is connected for that path -- "
+        "commands will fail until the notebook is open in the classic UI; check the path if it already is"
+    )
 
 
 @mcp.tool()
