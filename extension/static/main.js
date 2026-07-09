@@ -1,6 +1,5 @@
-// nbclassic frontend extension: gives the nbclassic-mcp-bridge relay a live
-// handle on Jupyter.notebook so an MCP client can read/edit/run cells, and
-// pushes the human's edits back so the assistant stays current.
+// nbclassic frontend extension: gives the nbclassic-mcp-bridge relay a live handle on Jupyter.notebook
+// so an MCP client can read/edit/run cells, and pushes the human's edits back so the assistant stays current.
 define([
     "base/js/namespace",
     "base/js/events",
@@ -17,8 +16,7 @@ define([
     // must stand down instead of reconnecting, or the two tabs evict each other forever.
     var EVICTED_REASON = "replaced by a newer connection";
 
-    // Sentinel: the op sends its own reply later (execute_cell), so applyCommand
-    // must not reply for it.
+    // Sentinel: the op sends its own reply later (execute_cell), so applyCommand must not reply for it.
     var DEFERRED = {};
 
     var ws = null;
@@ -31,7 +29,6 @@ define([
     var lastAgentWrite = {};        // cell_id -> source the mcp side last wrote, to drop its echo
     var debounceTimer = null;
 
-    // --- frame I/O ---------------------------------------------------------
 
     function sendFrame(obj) {
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -43,7 +40,6 @@ define([
         sendFrame({ kind: "event", name: name, data: data });
     }
 
-    // --- cell helpers ------------------------------------------------------
 
     function cellById(id) {
         var cells = Jupyter.notebook.get_cells();
@@ -121,7 +117,6 @@ define([
         return outputs;
     }
 
-    // --- command dispatch --------------------------------------------------
 
     // runOp executes with the echo of its own mutations suppressed: the create/delete/change handlers
     // it triggers fire synchronously inside it; the asynchronous cell_executed echo is handled by
@@ -168,8 +163,7 @@ define([
                 return { cell_id: args.cell_id, status: "skipped", reason: "focused" };
             }
             var edited = requireCell(args.cell_id);
-            // set_text drops a rendered markdown cell back to its raw source;
-            // restore whichever view the cell was in.
+            // set_text drops a rendered markdown cell back to its raw source; restore the view it was in.
             var wasRendered = edited.rendered;
             writeAgentSource(edited, args.source || "");
             if (wasRendered) { edited.render(); }
@@ -190,8 +184,8 @@ define([
         }
     }
 
-    // No index-based move exists in nbclassic; delete then reinsert. fromJSON
-    // restores id, source and outputs, so the cell keeps its identity.
+    // No index-based move exists in nbclassic; delete then reinsert. fromJSON restores id, source and
+    // outputs, so the cell keeps its identity.
     function moveCell(cellId, index) {
         var nb = Jupyter.notebook;
         var cell = requireCell(cellId);
@@ -209,8 +203,7 @@ define([
         return { cell_id: cellId, index: nb.find_cell_index(moved) };
     }
 
-    // execute_cell is async: the reply waits for finished_execute.CodeCell so it
-    // can carry real outputs.
+    // execute_cell replies later: the reply waits for finished_execute.CodeCell to carry real outputs.
     function executeCell(cellId, id, timeoutMs) {
         var cell = requireCell(cellId);
         if (cell.cell_type !== "code") {
@@ -246,7 +239,6 @@ define([
         cell.execute();
     }
 
-    // --- connection --------------------------------------------------------
 
     function relayUrl() {
         var loc = window.location;
@@ -302,7 +294,6 @@ define([
         if (evicted && ws === null) { connect(); }
     }
 
-    // --- human-edit events -------------------------------------------------
 
     function flushDirty() {
         if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }

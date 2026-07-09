@@ -15,9 +15,8 @@ MAX_FRAME_BYTES = 128 * 1024 * 1024
 class BridgeHandler(WebSocketMixin, WebSocketHandler, JupyterHandler):
     """WebSocket transport adapter: a *peer* in the Switchboard's vocabulary.
 
-    All routing lives in ``Switchboard``; this class only carries frames on and
-    off the socket. ``role`` and ``notebook`` are set by the switchboard during
-    the ``hello`` handshake.
+    All routing lives in ``Switchboard``; this class only carries frames on and off the socket.
+    ``role`` and ``notebook`` are set by the switchboard during the ``hello`` handshake.
     """
 
     @property

@@ -18,9 +18,9 @@ mcp = FastMCP("nbclassic-mcp-bridge")
 _JUPYTER_URL = os.environ.get("JUPYTER_URL", "http://localhost:8888")
 _relay = RelayClient(jupyter_url=_JUPYTER_URL, token=os.environ.get("JUPYTER_TOKEN", ""))
 
-# Longest text kept verbatim, per output payload and per cell source. Anything
-# longer is truncated so one runaway cell or output cannot blow the response
-# budget. Source gets a larger allowance -- it is the content worth reading.
+# Longest text kept verbatim, per output payload and per cell source. Anything longer is truncated so
+# one runaway cell or output cannot blow the response budget; source gets the larger allowance because
+# it is the content worth reading.
 _OUTPUT_CHAR_LIMIT = 4096
 _SOURCE_CHAR_LIMIT = 16384
 
@@ -33,9 +33,8 @@ def _env_flag(name: str, default: bool) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-# Image outputs (base64 PNGs and the like) are large and burn tokens, so they
-# are dropped from results unless ALLOW_IMG_OUTPUT is set. The text/plain
-# representation of an output is always kept.
+# Image outputs (base64 PNGs and the like) are large and burn tokens, so they are dropped from text
+# results unless ALLOW_IMG_OUTPUT is set; an output's text/plain representation is always kept.
 ALLOW_IMG_OUTPUT = _env_flag("ALLOW_IMG_OUTPUT", False)
 
 
@@ -252,11 +251,10 @@ async def insert_cell(index: int, cell_type: str, source: str) -> dict:
 async def set_cell_source(cell_id: str, source: str) -> dict:
     """Replace a cell's source.
 
-    Returns ``{"cell_id": ..., "status": "written"}`` on success. If the
-    human is currently focused on the target cell the write is skipped to
-    avoid clobbering an in-progress edit, and the return is
-    ``{"cell_id": ..., "status": "skipped", "reason": "focused"}`` — the
-    caller should check ``status`` before assuming the write took effect.
+    Returns ``{"cell_id": ..., "status": "written"}`` on success. If the human is currently focused
+    on the target cell the write is skipped to avoid clobbering an in-progress edit, and the return
+    is ``{"cell_id": ..., "status": "skipped", "reason": "focused"}`` — the caller should check
+    ``status`` before assuming the write took effect.
     """
     return await _relay.command("set_source", {"cell_id": cell_id, "source": source})
 
