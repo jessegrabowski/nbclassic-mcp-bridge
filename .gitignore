@@ -11,3 +11,6 @@ node_modules/
 scratch/
 .idea/
 .pixi/
+.coverage*
+coverage/
+coverage.xml

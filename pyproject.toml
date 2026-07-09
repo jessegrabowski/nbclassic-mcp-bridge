@@ -36,6 +36,7 @@ nbclassic-mcp-bridge-mcp = { path = "mcp_server", editable = true }
 
 [tool.pixi.feature.test.pypi-dependencies]
 pytest = "*"
+pytest-cov = "*"
 pytest-randomly = "*"
 playwright = "*"
 
