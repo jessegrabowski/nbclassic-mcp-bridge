@@ -74,18 +74,7 @@ async def _wait_for_live_kernel(page, port):
     )
 
 
-@pytest.fixture(scope="module")
-def nbclassic_port(tmp_path_factory):
-    """Run a real nbclassic server with the bridge extension; yield its port.
-
-    Tests share one seed notebook but stay order-independent because mutations live only in each
-    test's browser DOM: nothing ever saves, and nbclassic's 120s autosave never fires within the
-    module's runtime. A test that saves the notebook (or runs long enough to autosave) breaks
-    that invariant and must use its own notebook file.
-    """
-    port = free_port()
-    nbdir = str(tmp_path_factory.mktemp("nbclassic"))
-    Path(nbdir, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
+def _start_nbclassic(port, nbdir):
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -102,8 +91,24 @@ def nbclassic_port(tmp_path_factory):
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    wait_until_up(port, TOKEN, timeout=40, label="nbclassic")
+    return proc
+
+
+@pytest.fixture(scope="module")
+def nbclassic_port(tmp_path_factory):
+    """Run a real nbclassic server with the bridge extension; yield its port.
+
+    Tests share one seed notebook but stay order-independent because mutations live only in each
+    test's browser DOM: nothing ever saves, and nbclassic's 120s autosave never fires within the
+    module's runtime. A test that saves the notebook (or runs long enough to autosave) breaks
+    that invariant and must use its own notebook file.
+    """
+    port = free_port()
+    nbdir = str(tmp_path_factory.mktemp("nbclassic"))
+    Path(nbdir, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
+    proc = _start_nbclassic(port, nbdir)
     try:
-        wait_until_up(port, TOKEN, timeout=40, label="nbclassic")
         yield port
     finally:
         proc.terminate()
@@ -458,6 +463,54 @@ def test_dead_kernel_fails_fast_and_pushes_kernel_status(nbclassic_port):
             finally:
                 mcp.close()
                 await browser.close()
+
+    asyncio.run(scenario())
+
+
+def test_relay_client_reattaches_across_a_server_restart(tmp_path):
+    """The full recovery arc: server dies, extension reconnects on backoff, RelayClient reattaches."""
+    relay_client = pytest.importorskip("nbclassic_mcp_bridge_mcp.relay_client")
+
+    async def snapshot_when_bridge_ready(client, timeout, failure_message):
+        deadline = asyncio.get_event_loop().time() + timeout
+        while True:
+            try:
+                return await client.command("snapshot", {})
+            except (RuntimeError, OSError):
+                assert asyncio.get_event_loop().time() < deadline, failure_message
+                await asyncio.sleep(0.5)
+
+    async def scenario():
+        port = free_port()
+        Path(tmp_path, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
+        proc = _start_nbclassic(port, tmp_path)
+        client = relay_client.RelayClient(f"http://localhost:{port}", TOKEN)
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch()
+                page = await browser.new_page()
+                await page.goto(f"http://localhost:{port}/notebooks/{NOTEBOOK}?token={TOKEN}")
+                await page.wait_for_selector(".cell", timeout=20000)
+
+                await client.connect(NOTEBOOK)
+                before = await snapshot_when_bridge_ready(client, 20, "bridge never came up")
+
+                proc.terminate()
+                proc.wait(timeout=10)
+                proc = _start_nbclassic(port, tmp_path)
+
+                # Same client object, no manual reconnect: command() must reattach by itself once
+                # the browser tab's backoff loop rejoins the new server's relay.
+                after = await snapshot_when_bridge_ready(client, 40, "bridge never recovered")
+                assert [c["source"] for c in after] == [c["source"] for c in before]
+                await browser.close()
+        finally:
+            await client.close()
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
     asyncio.run(scenario())
 
