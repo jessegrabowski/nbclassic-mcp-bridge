@@ -7,6 +7,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
 
+from nbclassic_mcp_bridge_mcp import discovery
 from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
 
 
@@ -156,19 +157,59 @@ def _derive_endpoint(project_path: str) -> tuple[str, str]:
     return _JUPYTER_URL, token
 
 
+async def _open_notebooks() -> list[dict]:
+    """Fetch the merged discovery view for the relay's current Jupyter server."""
+    sessions = await discovery.list_sessions(_relay.jupyter_url, _relay.token)
+    rooms = await discovery.fetch_rooms(_relay.jupyter_url, _relay.token)
+    return discovery.merge_notebook_view(sessions, rooms)
+
+
 @mcp.tool()
-async def use_notebook(path: str) -> str:
+async def list_notebooks() -> list[dict]:
+    """List the notebooks open on the Jupyter server.
+
+    Each record carries the notebook's path, kernel state, and whether a browser tab and an
+    assistant are currently connected to it.
+    """
+    return await _open_notebooks()
+
+
+@mcp.tool()
+async def use_notebook(path: str | None = None) -> str:
     """Attach the bridge to a notebook open in the classic Notebook UI.
 
-    Say whether the notebook's browser tab is connected: commands only work once the human has the
-    notebook open (with the same path the server reports for it).
+    With no ``path``, attach to the only open notebook (preferring one with a connected browser
+    tab); when several are open, list them instead of guessing. A ``path`` that does not exactly
+    match an open notebook is resolved fuzzily (case-insensitive, basename, substring). Say whether
+    the notebook's browser tab is connected: commands only work once the human has the notebook
+    open. Default None.
     """
+    notebooks = await _open_notebooks()
+    note = ""
+    if path is None:
+        candidates = [n for n in notebooks if n["browser_tab_connected"]] or notebooks
+        if not candidates:
+            return f"no notebooks are open on {_relay.jupyter_url}; open one in the classic UI first"
+        if len(candidates) > 1:
+            listing = ", ".join(n["path"] for n in candidates)
+            return f"several notebooks are open ({listing}); call use_notebook with one of these paths"
+        path = candidates[0]["path"]
+    else:
+        match, ambiguous = discovery.match_notebook(path, [n["path"] for n in notebooks])
+        if match is None and ambiguous:
+            return f"'{path}' matches several open notebooks: {', '.join(ambiguous)}; pick one"
+        if match is not None and match != path:
+            note = f" (resolved from '{path}')"
+            path = match
+        # No match at all still attaches verbatim: the room outlives this call, so opening the
+        # notebook afterwards completes the attachment.
     await _relay.connect(path)
     if await _relay.extension_present():
-        return f"attached to {path} (browser tab connected)"
+        return f"attached to {path}{note} (browser tab connected)"
+    open_listing = ", ".join(n["path"] for n in notebooks) or "none"
     return (
-        f"attached to {path}, but no browser tab is connected for that path -- "
-        "commands will fail until the notebook is open in the classic UI; check the path if it already is"
+        f"attached to {path}{note}, but no browser tab is connected for that path -- "
+        f"commands will fail until the notebook is open in the classic UI. Open notebooks: {open_listing}"
     )
 
 

@@ -1,4 +1,6 @@
-from jupyter_server.base.handlers import JupyterHandler
+import json
+
+from jupyter_server.base.handlers import APIHandler, JupyterHandler
 from jupyter_server.base.websocket import WebSocketMixin
 from tornado import web
 from tornado.websocket import WebSocketClosedError, WebSocketHandler
@@ -62,3 +64,16 @@ class BridgeHandler(WebSocketMixin, WebSocketHandler, JupyterHandler):
     def check_xsrf_cookie(self):
         # WebSocket upgrades carry no XSRF cookie; auth is the token, enforced in pre_get.
         pass
+
+
+class RoomsHandler(APIHandler):
+    """Report which notebooks have live bridge rooms, so MCP clients can discover open tabs.
+
+    The APIHandler base makes ``@web.authenticated`` answer an unauthenticated GET with a hard
+    403 instead of a redirect to the login page.
+    """
+
+    @web.authenticated
+    def get(self):
+        switchboard = self.settings[SWITCHBOARD_KEY]
+        self.finish(json.dumps({"rooms": switchboard.presence()}))

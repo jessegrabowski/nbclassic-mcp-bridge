@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 
 from nbclassic_mcp_bridge_mcp.server import (
@@ -155,3 +156,75 @@ def test_cell_output_view_full_skips_text_truncation():
 
     assert "truncated" in _cell_output_view(fresh_cell(), full=False)["outputs"][0]["text"]
     assert _cell_output_view(fresh_cell(), full=True)["outputs"][0]["text"] == "z" * 10000
+
+
+class StubRelay:
+    """Relay double for tool-level tests: records connects, scripts tab presence."""
+
+    def __init__(self, tab_connected=True):
+        self.jupyter_url = "http://localhost:8888"
+        self.token = "tok"
+        self.connected_to = None
+        self._tab_connected = tab_connected
+
+    async def connect(self, path):
+        self.connected_to = path
+
+    async def extension_present(self, timeout=0.5):
+        return self._tab_connected
+
+
+def _run_use_notebook(monkeypatch, notebooks, path=None, tab_connected=True):
+    import nbclassic_mcp_bridge_mcp.server as server
+
+    stub = StubRelay(tab_connected)
+    monkeypatch.setattr(server, "_relay", stub)
+
+    async def fake_open_notebooks():
+        return notebooks
+
+    monkeypatch.setattr(server, "_open_notebooks", fake_open_notebooks)
+    return asyncio.run(server.use_notebook(path)), stub
+
+
+def _record(path, tab=True):
+    return {"path": path, "kernel_state": "idle", "browser_tab_connected": tab, "assistant_attached": False}
+
+
+def test_use_notebook_auto_attaches_the_only_open_notebook(monkeypatch):
+    message, stub = _run_use_notebook(monkeypatch, [_record("nb/a.ipynb")])
+    assert stub.connected_to == "nb/a.ipynb"
+    assert "attached to nb/a.ipynb" in message and "browser tab connected" in message
+
+
+def test_use_notebook_prefers_the_notebook_with_a_live_tab(monkeypatch):
+    notebooks = [_record("nb/a.ipynb", tab=False), _record("nb/b.ipynb", tab=True)]
+    _, stub = _run_use_notebook(monkeypatch, notebooks)
+    assert stub.connected_to == "nb/b.ipynb"
+
+
+def test_use_notebook_lists_options_instead_of_guessing(monkeypatch):
+    notebooks = [_record("nb/a.ipynb"), _record("nb/b.ipynb")]
+    message, stub = _run_use_notebook(monkeypatch, notebooks)
+    assert stub.connected_to is None
+    assert "nb/a.ipynb" in message and "nb/b.ipynb" in message
+
+
+def test_use_notebook_resolves_a_fuzzy_path(monkeypatch):
+    message, stub = _run_use_notebook(monkeypatch, [_record("notebooks/demo.ipynb")], path="demo.ipynb")
+    assert stub.connected_to == "notebooks/demo.ipynb"
+    assert "resolved from 'demo.ipynb'" in message
+
+
+def test_use_notebook_reports_ambiguous_paths_without_attaching(monkeypatch):
+    notebooks = [_record("a/report.ipynb"), _record("b/report.ipynb")]
+    message, stub = _run_use_notebook(monkeypatch, notebooks, path="report.ipynb")
+    assert stub.connected_to is None
+    assert "a/report.ipynb" in message and "b/report.ipynb" in message
+
+
+def test_use_notebook_attaches_verbatim_when_nothing_matches(monkeypatch):
+    # The room outlives the call, so attaching before the human opens the notebook still works.
+    message, stub = _run_use_notebook(monkeypatch, [_record("nb/a.ipynb")], path="new.ipynb", tab_connected=False)
+    assert stub.connected_to == "new.ipynb"
+    assert "no browser tab is connected" in message and "nb/a.ipynb" in message

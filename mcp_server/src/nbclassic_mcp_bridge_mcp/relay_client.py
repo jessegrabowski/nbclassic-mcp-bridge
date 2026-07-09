@@ -43,6 +43,16 @@ class RelayClient:
         self._conn_lock = asyncio.Lock()
         self._extension_joined = asyncio.Event()
 
+    @property
+    def jupyter_url(self) -> str:
+        """The Jupyter server the relay currently targets."""
+        return self._jupyter_url
+
+    @property
+    def token(self) -> str:
+        """The token for the currently targeted Jupyter server."""
+        return self._token
+
     def _relay_url(self) -> str:
         """Derive the relay WebSocket URL from the configured Jupyter URL."""
         parts = urlsplit(self._jupyter_url)

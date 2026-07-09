@@ -197,3 +197,18 @@ def test_evicted_peer_leaving_does_not_disturb_the_room():
     sb.leave(first)
     assert sb.rooms["nb.ipynb"]["mcp"] is second
     assert ext.sent == []
+
+
+def test_presence_maps_live_rooms_to_roles():
+    sb = Switchboard()
+    join(sb, "extension", "a.ipynb")
+    join(sb, "extension", "b.ipynb")
+    join(sb, "mcp", "b.ipynb")
+    assert sb.presence() == {"a.ipynb": ["extension"], "b.ipynb": ["extension", "mcp"]}
+
+
+def test_presence_forgets_departed_rooms():
+    sb = Switchboard()
+    peer = join(sb, "mcp")
+    sb.leave(peer)
+    assert sb.presence() == {}

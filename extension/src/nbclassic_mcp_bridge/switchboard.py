@@ -109,5 +109,9 @@ class Switchboard:
             _send(target, {"kind": "status", "peer": role, "state": "joined"})
             _send(peer, {"kind": "status", "peer": _other(role), "state": "joined"})
 
+    def presence(self):
+        """Map each notebook path with a live room to the sorted roles present in it."""
+        return {notebook: sorted(room) for notebook, room in self.rooms.items() if room}
+
     def _peer(self, peer):
         return self.rooms.get(peer.notebook, {}).get(_other(peer.role))

@@ -6,7 +6,7 @@ import sys
 
 import pytest
 from conftest import free_port, wait_until_up
-from tornado.httpclient import HTTPClientError
+from tornado.httpclient import AsyncHTTPClient, HTTPClientError
 from tornado.websocket import websocket_connect
 
 from nbclassic_mcp_bridge.switchboard import PROTOCOL_VERSION
@@ -70,6 +70,46 @@ def test_hello_roundtrip_over_real_sockets(relay_url):
 
         ext.close()
         mcp.close()
+
+    asyncio.run(scenario())
+
+
+def test_rooms_endpoint_reports_live_presence(relay_url):
+    # Assertions are scoped to this test's own notebook: the module-scoped server is shared, so
+    # other tests' rooms may still be draining when this one polls.
+    async def scenario():
+        http_url = relay_url.replace("ws://", "http://") + f"/rooms?token={TOKEN}"
+        client = AsyncHTTPClient()
+
+        async def rooms_entry(deadline_s=5, until=lambda entry: entry is not None):
+            deadline = asyncio.get_event_loop().time() + deadline_s
+            entry = None
+            while asyncio.get_event_loop().time() < deadline:
+                entry = json.loads((await client.fetch(http_url)).body)["rooms"].get("open.ipynb")
+                if until(entry):
+                    break
+                await asyncio.sleep(0.05)
+            return entry
+
+        before = json.loads((await client.fetch(http_url)).body)
+        assert "open.ipynb" not in before["rooms"]
+
+        ext = await websocket_connect(f"{relay_url}?token={TOKEN}")
+        ext.write_message(hello("extension", "open.ipynb"))
+        assert await rooms_entry() == ["extension"]
+
+        ext.close()
+        assert await rooms_entry(until=lambda entry: entry is None) is None
+
+    asyncio.run(scenario())
+
+
+def test_rooms_endpoint_requires_auth(relay_url):
+    async def scenario():
+        http_url = relay_url.replace("ws://", "http://") + "/rooms"
+        with pytest.raises(HTTPClientError) as exc_info:
+            await AsyncHTTPClient().fetch(http_url)
+        assert exc_info.value.code == 403
 
     asyncio.run(scenario())
 
