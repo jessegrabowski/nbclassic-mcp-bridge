@@ -6,6 +6,7 @@ from nbclassic_mcp_bridge_mcp.server import (
     _cell_source_view,
     _clean_output,
     _derive_endpoint,
+    _extract_images,
     _outline_cell,
     _summarize_output,
     _truncate,
@@ -94,6 +95,24 @@ def test_outline_cell_passes_through_an_extension_side_summary():
     summary = [{"output_type": "execute_result", "mime_types": ["image/png"]}]
     cell = {"cell_id": "c1", "index": 0, "cell_type": "code", "source": "plot()", "output_summary": summary}
     assert _outline_cell(cell)["output_summary"] == summary
+
+
+def test_extract_images_collects_raster_payloads_in_document_order():
+    cell = {
+        "outputs": [
+            {"output_type": "stream", "name": "stdout", "text": "no data dict"},
+            {"output_type": "display_data", "data": {"image/png": ["QUJD", "REVG"], "text/plain": "fig1"}},
+            {"output_type": "execute_result", "data": {"image/svg+xml": "<svg/>", "image/jpeg": "R0lG"}},
+        ]
+    }
+    images = _extract_images(cell)
+    # multiline base64 is joined; SVG (text, not base64) is skipped
+    assert images == [("image/png", "QUJDREVG"), ("image/jpeg", "R0lG")]
+
+
+def test_extract_images_returns_empty_for_imageless_cells():
+    assert _extract_images({"outputs": [{"output_type": "stream", "text": "hi"}]}) == []
+    assert _extract_images({}) == []
 
 
 def test_cell_source_view_returns_source_without_outputs():

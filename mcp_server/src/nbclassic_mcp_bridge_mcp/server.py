@@ -1,10 +1,11 @@
+import base64
 import hashlib
 import logging
 import os
 import sys
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
 
@@ -125,6 +126,25 @@ def _cell_output_view(cell: dict, full: bool) -> dict:
     return {"cell_id": cell.get("cell_id"), "outputs": outputs}
 
 
+def _extract_images(cell: dict) -> list[tuple[str, str]]:
+    """Collect a cell's raster image payloads as (mime type, base64) pairs.
+
+    Walks the outputs in document order. SVG is skipped -- it is text, not base64, and is delivered
+    through ``read_cell_output`` like any other text payload.
+    """
+    images = []
+    for output in cell.get("outputs", []):
+        data = output.get("data") if isinstance(output, dict) else None
+        if not isinstance(data, dict):
+            continue
+        images.extend(
+            (mime, _as_text(data[mime]))
+            for mime in sorted(data)
+            if mime.startswith("image/") and mime != "image/svg+xml"
+        )
+    return images
+
+
 def _derive_endpoint(project_path: str) -> tuple[str, str]:
     """Derive a project's Jupyter URL and token from its directory path.
 
@@ -196,10 +216,30 @@ async def read_cell_source(cell_id: str, full: bool = False) -> dict:
 async def read_cell_output(cell_id: str, full: bool = False) -> dict:
     """Return one cell's outputs (with its id), not its source.
 
-    Long text in each output is truncated unless ``full`` is true; images are
-    governed by ALLOW_IMG_OUTPUT.
+    Long text in each output is truncated unless ``full`` is true. Image payloads are stubbed out
+    (unless ALLOW_IMG_OUTPUT is set); to look at one, call ``read_cell_image``.
     """
     return _cell_output_view(await _relay.command("read_cell", {"cell_id": cell_id}), full)
+
+
+@mcp.tool()
+async def read_cell_image(cell_id: str, image_index: int = 0) -> Image:
+    """Return one of a cell's image outputs as a viewable image.
+
+    A cell can hold several images; ``image_index`` picks among them in document order. Default 0
+    (the first). Use this to actually look at a plot -- image payloads are stubbed out of every
+    text-returning tool.
+    """
+    cell = await _relay.command("read_cell", {"cell_id": cell_id})
+    images = _extract_images(cell)
+    if not images:
+        raise RuntimeError(f"cell {cell_id} has no raster image outputs")
+    if not 0 <= image_index < len(images):
+        raise RuntimeError(
+            f"cell {cell_id} has {len(images)} image output(s); image_index {image_index} is out of range"
+        )
+    mime, payload = images[image_index]
+    return Image(data=base64.b64decode(payload), format=mime.removeprefix("image/"))
 
 
 @mcp.tool()
@@ -251,7 +291,8 @@ async def poll_events(cursor: int = 0) -> dict:
     Pass 0 on the first call, then feed the returned ``cursor`` back to get only newer events. Each
     event is ``{name, data}`` -- one of cell_created, cell_deleted, cell_moved, cell_executed,
     source_changed, focus_changed -- and reflects the human's actions only (your own commands are
-    not echoed back).
+    not echoed back). Image payloads are omitted from cell_executed outputs; use
+    ``read_cell_image`` to view them.
     """
     events, new_cursor = _relay.events_since(cursor)
     return _clean_event_outputs({"events": events, "cursor": new_cursor})
