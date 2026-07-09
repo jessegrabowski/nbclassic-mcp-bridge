@@ -16,14 +16,13 @@ def _send(peer, msg):
 class Switchboard:
     """Transport-agnostic relay logic for the nbclassic-mcp-bridge.
 
-    Operates on duck-typed *peers*: any object with mutable ``role`` and
-    ``notebook`` attributes (both ``None`` until a successful ``hello``) and
-    ``send(text)`` / ``close(code, reason)`` methods. ``BridgeHandler`` is the
-    production peer; tests use a list-backed fake. Keeping the routing here,
-    free of any WebSocket type, is what makes it unit-testable without mocking.
+    Operates on duck-typed *peers*: any object with mutable ``role`` and ``notebook`` attributes
+    (both ``None`` until a successful ``hello``) and ``send(text)`` / ``close(code, reason)``
+    methods. ``BridgeHandler`` is the production peer; tests use a list-backed fake. Keeping the
+    routing here, free of any WebSocket type, is what makes it unit-testable without mocking.
 
-    All methods are synchronous: ``send`` is fire-and-forget and ``close`` only
-    schedules a close, so nothing here needs to await.
+    All methods are synchronous: ``send`` is fire-and-forget and ``close`` only schedules a close,
+    so nothing here needs to await.
     """
 
     def __init__(self):
@@ -37,6 +36,9 @@ class Switchboard:
             msg = json.loads(raw)
         except (ValueError, TypeError):
             peer.close(1003, "expected a JSON text frame")
+            return
+        if not isinstance(msg, dict):
+            peer.close(1003, "expected a JSON object frame")
             return
 
         kind = msg.get("kind")

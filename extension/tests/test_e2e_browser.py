@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -65,11 +64,27 @@ def _wait_for_kernel(port, timeout=45):
     raise RuntimeError("no kernel became ready")
 
 
+async def _wait_for_live_kernel(page, port):
+    """Block until the kernel is running server-side and the page's kernel websocket is connected."""
+    _wait_for_kernel(port)
+    await page.wait_for_function(
+        "() => { var k = window.Jupyter && Jupyter.notebook && Jupyter.notebook.kernel;"
+        " return !!k && (!k.is_connected || k.is_connected()); }",
+        timeout=45000,
+    )
+
+
 @pytest.fixture(scope="module")
-def nbclassic_port():
-    """Run a real nbclassic server with the bridge extension; yield its port."""
+def nbclassic_port(tmp_path_factory):
+    """Run a real nbclassic server with the bridge extension; yield its port.
+
+    Tests share one seed notebook but stay order-independent because mutations live only in each
+    test's browser DOM: nothing ever saves, and nbclassic's 120s autosave never fires within the
+    module's runtime. A test that saves the notebook (or runs long enough to autosave) breaks
+    that invariant and must use its own notebook file.
+    """
     port = free_port()
-    nbdir = tempfile.mkdtemp()
+    nbdir = str(tmp_path_factory.mktemp("nbclassic"))
     Path(nbdir, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
     proc = subprocess.Popen(
         [
@@ -141,12 +156,32 @@ class McpPeer:
             if predicate(frame):
                 return frame
 
-    async def command(self, op, args, timeout=30):
+    def send_cmd(self, op, args):
+        """Fire a cmd without awaiting its reply; return the id to match on."""
         msg_id = next(self._ids)
         self._ws.write_message(json.dumps({"kind": "cmd", "id": msg_id, "op": op, "args": args}))
+        return msg_id
+
+    async def command(self, op, args, timeout=30):
+        msg_id = self.send_cmd(op, args)
         reply = await self.recv_until(lambda f: f.get("kind") == "reply" and f.get("id") == msg_id, timeout)
         assert reply.get("ok"), reply.get("error")
         return reply.get("result")
+
+    async def drain_events(self, seconds):
+        """Collect event frames for ``seconds``, discarding everything else."""
+        deadline = asyncio.get_event_loop().time() + seconds
+        events = []
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                return events
+            try:
+                frame = await self._recv(remaining)
+            except TimeoutError:
+                return events
+            if frame.get("kind") == "event":
+                events.append(frame)
 
     def close(self):
         self._ws.close()
@@ -159,7 +194,7 @@ def test_mcp_commands_drive_the_live_notebook(nbclassic_port):
             page = await browser.new_page()
             mcp = await McpPeer.connect(nbclassic_port)
             try:
-                url = f"http://localhost:{nbclassic_port}/nbclassic/notebooks/{NOTEBOOK}?token={TOKEN}"
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
                 await page.goto(url)
                 # main.js connecting is what makes the relay announce the extension peer.
                 await mcp.recv_until(_extension_joined)
@@ -182,15 +217,88 @@ def test_mcp_commands_drive_the_live_notebook(nbclassic_port):
                 )
                 assert edited == "print('edited')"
 
-                _wait_for_kernel(nbclassic_port)
-                await page.wait_for_function(
-                    "() => { var k = window.Jupyter && Jupyter.notebook && Jupyter.notebook.kernel;"
-                    " return !!k && (!k.is_connected || k.is_connected()); }",
-                    timeout=45000,
-                )
+                await _wait_for_live_kernel(page, nbclassic_port)
                 result = await mcp.command("execute_cell", {"cell_id": created["cell_id"]}, timeout=60)
                 stdout = "".join(o.get("text", "") for o in result["outputs"] if o.get("output_type") == "stream")
                 assert "inserted" in stdout
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
+def test_agent_commands_do_not_echo_as_events(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
+                await page.goto(url)
+                await mcp.recv_until(_extension_joined)
+                cells = await mcp.command("snapshot", {})
+
+                # Mutations from this (the mcp) side must not come back as "human" events.
+                await mcp.command("set_source", {"cell_id": cells[0]["cell_id"], "source": "print('agent')"})
+                created = await mcp.command("insert_cell", {"index": 0, "cell_type": "code", "source": "1"})
+                await mcp.command("move_cell", {"cell_id": created["cell_id"], "index": 1})
+                await mcp.command("delete_cell", {"cell_id": created["cell_id"]})
+                echoes = await mcp.drain_events(2.0)  # past the 400ms source debounce
+                assert echoes == [], [e["name"] for e in echoes]
+
+                await _wait_for_live_kernel(page, nbclassic_port)
+                await mcp.command("execute_cell", {"cell_id": cells[0]["cell_id"]}, timeout=60)
+                echoes = await mcp.drain_events(1.5)
+                assert echoes == [], [e["name"] for e in echoes]
+
+                # A second execute of a cell still running is rejected, not double-subscribed.
+                slow = await mcp.command(
+                    "insert_cell", {"index": 0, "cell_type": "code", "source": "import time; time.sleep(2)"}
+                )
+                first = mcp.send_cmd("execute_cell", {"cell_id": slow["cell_id"]})
+                second = mcp.send_cmd("execute_cell", {"cell_id": slow["cell_id"]})
+                rejected = await mcp.recv_until(
+                    lambda f: f.get("kind") == "reply" and f.get("id") == second, timeout=10
+                )
+                assert not rejected.get("ok") and "already executing" in rejected.get("error", "")
+                completed = await mcp.recv_until(
+                    lambda f: f.get("kind") == "reply" and f.get("id") == first, timeout=60
+                )
+                assert completed.get("ok"), completed.get("error")
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_second_tab_takes_over_and_the_first_stands_down(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
+                page1 = await browser.new_page()
+                await page1.goto(url)
+                await mcp.recv_until(_extension_joined)
+
+                page2 = await browser.new_page()
+                await page2.goto(url)
+                await mcp.recv_until(_extension_joined)
+
+                # The evicted tab must stand down rather than reconnect and evict us back; six quiet
+                # seconds (past several reconnect backoffs) proves there is no churn.
+                with pytest.raises(TimeoutError):
+                    await mcp.recv_until(lambda f: f.get("kind") == "status", timeout=6)
+                assert await mcp.command("snapshot", {}) is not None
+
+                # Returning to the first tab hands it the room back.
+                await page1.evaluate("window.dispatchEvent(new Event('focus'))")
+                await mcp.recv_until(_extension_joined, timeout=10)
+                assert await mcp.command("snapshot", {}) is not None
             finally:
                 mcp.close()
                 await browser.close()
@@ -205,7 +313,7 @@ def test_human_edits_surface_as_events(nbclassic_port):
             page = await browser.new_page()
             mcp = await McpPeer.connect(nbclassic_port)
             try:
-                url = f"http://localhost:{nbclassic_port}/nbclassic/notebooks/{NOTEBOOK}?token={TOKEN}"
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
                 await page.goto(url)
                 await mcp.recv_until(_extension_joined)
 
@@ -216,6 +324,17 @@ def test_human_edits_surface_as_events(nbclassic_port):
 
                 event = await mcp.recv_until(lambda f: f.get("kind") == "event" and f.get("name") == "source_changed")
                 assert "typed by a human" in event["data"]["source"]
+
+                # Move a cell as a human would (the toolbar/keyboard path); every displaced
+                # cell surfaces as a cell_moved with its new index.
+                first_id = await page.evaluate("Jupyter.notebook.get_cells()[0].id")
+                await page.evaluate("() => { Jupyter.notebook.select(0); Jupyter.notebook.move_selection_down(); }")
+                moved = await mcp.recv_until(
+                    lambda f: (
+                        f.get("kind") == "event" and f.get("name") == "cell_moved" and f["data"]["cell_id"] == first_id
+                    )
+                )
+                assert moved["data"]["index"] == 1
             finally:
                 mcp.close()
                 await browser.close()

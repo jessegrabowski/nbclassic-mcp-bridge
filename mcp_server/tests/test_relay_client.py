@@ -14,16 +14,17 @@ DROP = object()
 class FakeRelay:
     """A scriptable stand-in for the relay, exposed as an async context manager.
 
-    Records the first ``hello`` it receives, answers each ``cmd`` from the
-    ``replies`` table (op -> reply spec, or ``DROP`` to stay silent), and pushes
-    the frames in ``events`` once the handshake arrives.
+    Records every ``hello`` it receives, answers each ``cmd`` from the ``replies`` table (op ->
+    reply spec, or ``DROP`` to stay silent), and pushes the frames in ``events`` on each handshake.
     """
 
-    def __init__(self, replies=None, events=None):
+    def __init__(self, replies=None, events=None, extension_joined=False):
         self.replies = replies or {}
         self.events = events or []
-        self.hello: dict | None = None
+        self.extension_joined = extension_joined
+        self.hellos: list[dict] = []
         self._server = None
+        self._connections: set = set()
         self.port: int | None = None
 
     @property
@@ -39,18 +40,29 @@ class FakeRelay:
         self._server.close()
         await self._server.wait_closed()
 
+    async def kick(self):
+        """Server-side close of every live connection (eviction / restart)."""
+        for ws in list(self._connections):
+            await ws.close(code=1001, reason="replaced by a newer connection")
+
     async def _handle(self, ws):
-        async for raw in ws:
-            msg = json.loads(raw)
-            if msg["kind"] == "hello":
-                self.hello = msg
-                for name, data in self.events:
-                    await ws.send(json.dumps({"kind": "event", "name": name, "data": data}))
-            elif msg["kind"] == "cmd":
-                spec = self.replies.get(msg["op"], {"ok": True, "result": None})
-                if spec is DROP:
-                    continue
-                await ws.send(json.dumps({"kind": "reply", "id": msg["id"], **spec}))
+        self._connections.add(ws)
+        try:
+            async for raw in ws:
+                msg = json.loads(raw)
+                if msg["kind"] == "hello":
+                    self.hellos.append(msg)
+                    if self.extension_joined:
+                        await ws.send(json.dumps({"kind": "status", "peer": "extension", "state": "joined"}))
+                    for name, data in self.events:
+                        await ws.send(json.dumps({"kind": "event", "name": name, "data": data}))
+                elif msg["kind"] == "cmd":
+                    spec = self.replies.get(msg["op"], {"ok": True, "result": None})
+                    if spec is DROP:
+                        continue
+                    await ws.send(json.dumps({"kind": "reply", "id": msg["id"], **spec}))
+        finally:
+            self._connections.discard(ws)
 
 
 def test_connect_sends_a_well_formed_hello():
@@ -60,7 +72,7 @@ def test_connect_sends_a_well_formed_hello():
             await client.connect("nb.ipynb")
             await client.command("snapshot", {})  # round-trip barrier
             await client.close()
-            return relay.hello
+            return relay.hellos[-1]
 
     assert asyncio.run(scenario()) == {
         "kind": "hello",
@@ -142,10 +154,11 @@ def test_disconnect_fails_a_pending_command_instead_of_hanging():
             await client.connect("nb.ipynb")
             pending = asyncio.create_task(client.command("snapshot", {}))
             await asyncio.sleep(0.05)  # let the cmd reach the silent relay
-        # relay closed on context exit -> the awaiting command must error out
+        # relay closed on context exit -> the awaiting command must error out,
+        # flagging that the command's fate is unknown (no blind resend).
         await asyncio.wait_for(pending, timeout=2)
 
-    with pytest.raises(ConnectionError):
+    with pytest.raises(RuntimeError, match="may not have been applied"):
         asyncio.run(scenario())
 
 
@@ -157,11 +170,60 @@ def test_reconnecting_attaches_to_the_new_notebook():
             await client.connect("b.ipynb")
             got = await client.command("snapshot", {})
             await client.close()
-            return got, relay.hello
+            return got, relay.hellos[-1]
 
     got, hello = asyncio.run(scenario())
     assert got == "ok"
     assert hello["notebook"] == "b.ipynb"
+
+
+@pytest.mark.parametrize("joined", [True, False], ids=["extension-present", "extension-absent"])
+def test_extension_present_reflects_the_relay_status_frame(joined):
+    async def scenario():
+        async with FakeRelay(extension_joined=joined) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            present = await client.extension_present(timeout=0.5)
+            await client.close()
+            return present
+
+    assert asyncio.run(scenario()) is joined
+
+
+def test_events_since_recovers_from_a_stale_cursor():
+    # An MCP restart resets the event log while an agent may still hold its old, larger cursor;
+    # the poll must come back empty with a usable cursor instead of hiding new events forever.
+    async def scenario():
+        events = [("cell_created", {"cell_id": "a"}), ("cell_deleted", {"cell_id": "a"})]
+        async with FakeRelay(events=events) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            await client.command("snapshot", {})  # barrier: events arrive first (FIFO)
+            stale, recovered_cursor = client.events_since(cursor=10_000)
+            fresh, _ = client.events_since(0)
+            await client.close()
+            return stale, recovered_cursor, fresh
+
+    stale, recovered_cursor, fresh = asyncio.run(scenario())
+    assert stale == []
+    assert recovered_cursor == 2
+    assert [e["name"] for e in fresh] == ["cell_created", "cell_deleted"]
+
+
+def test_command_reattaches_after_the_relay_drops_the_connection():
+    async def scenario():
+        async with FakeRelay(replies={"snapshot": {"ok": True, "result": "ok"}}) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            await client.command("snapshot", {})
+            await relay.kick()  # eviction by another client, or a relay restart
+            got = await client.command("snapshot", {})
+            await client.close()
+            return got, relay.hellos
+
+    got, hellos = asyncio.run(scenario())
+    assert got == "ok"
+    assert [h["notebook"] for h in hellos] == ["nb.ipynb", "nb.ipynb"]
 
 
 def test_large_reply_survives_the_websockets_size_limit():

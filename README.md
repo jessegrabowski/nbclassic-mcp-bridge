@@ -36,12 +36,14 @@ extension with Jupyter automatically.
    run the `nbclassic-mcp-bridge` command with those two environment variables.
 3. Open a notebook in the browser. From the assistant, `use_notebook("<path>")` to attach,
    then `read_notebook`, `insert_cell`, `set_cell_source`, `execute_cell`, `move_cell`,
-   `delete_cell` to drive it, and `poll_events` to see what you have changed.
+   `delete_cell` to drive it, `read_cell_image` to look at a plot, and `poll_events` to
+   see what you have changed.
 
-Two more optional environment variables: `ALLOW_IMG_OUTPUT=1` includes image outputs in
-responses (off by default — base64 images are large and burn tokens; an output's text
-representation is always kept), and `LOG_LEVEL` sets the MCP server's log verbosity
-(default `INFO`).
+Two more optional environment variables: `ALLOW_IMG_OUTPUT=1` includes base64 image
+payloads in text responses (off by default — they are large and burn tokens; an output's
+text representation is always kept, and `read_cell_image` returns any image as a proper
+viewable image regardless of this flag), and `LOG_LEVEL` sets the MCP server's log
+verbosity (default `INFO`).
 
 Concurrent edits to the same cell are last-write-wins — fine for one human and one assistant
 taking turns.

@@ -81,8 +81,12 @@ def test_duplicate_hello_closes_the_peer():
     [
         (json.dumps({"kind": "cmd", "id": 1, "op": "snapshot", "args": {}}), 1002),
         ("{not json", 1003),
+        ("123", 1003),
+        ("null", 1003),
+        ("[1, 2]", 1003),
+        ('"hello"', 1003),
     ],
-    ids=["frame-before-hello", "malformed-json"],
+    ids=["frame-before-hello", "malformed-json", "json-int", "json-null", "json-list", "json-str"],
 )
 def test_route_rejects_bad_input(frame, expected_code):
     sb = Switchboard()

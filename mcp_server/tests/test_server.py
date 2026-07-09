@@ -1,27 +1,31 @@
+import hashlib
+
 from nbclassic_mcp_bridge_mcp.server import (
+    _JUPYTER_URL,
     _cell_output_view,
     _cell_source_view,
     _clean_output,
     _derive_endpoint,
+    _extract_images,
     _outline_cell,
     _summarize_output,
     _truncate,
 )
 
 
-def test_derive_endpoint_matches_jupyter_project_env_sh():
-    # Vector independently reproduced from the shell script's sha256 scheme.
-    url, token = _derive_endpoint("/home/user/project")
-    assert url == "http://localhost:10365"
-    assert token == "08b0b11cbcd860257e8bdfa6b8e5f017"
+def test_derive_endpoint_matches_nb_token(tmp_path):
+    # nb-token hashes the physical path: sha256(`cd DIR && pwd -P`) as 64 hex chars.
+    url, token = _derive_endpoint(str(tmp_path))
+    assert url == _JUPYTER_URL
+    assert token == hashlib.sha256(str(tmp_path.resolve()).encode()).hexdigest()
 
 
-def test_derive_endpoint_is_deterministic_and_in_range():
-    first = _derive_endpoint("/some/path")
-    assert _derive_endpoint("/some/path") == first
-    port = int(first[0].rsplit(":", 1)[1])
-    assert 10000 <= port < 30000
-    assert len(first[1]) == 32
+def test_derive_endpoint_resolves_symlinks_like_nb_token(tmp_path):
+    real = tmp_path / "project"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    assert _derive_endpoint(str(link)) == _derive_endpoint(str(real))
 
 
 def test_truncate_respects_the_limit_and_leaves_short_text():
@@ -84,6 +88,31 @@ def test_outline_cell_summarizes_outputs_and_truncates_runaway_source():
 
     runaway = _outline_cell({"cell_id": "c2", "cell_type": "code", "source": "x" * 100000})
     assert "truncated" in runaway["source"]
+
+
+def test_outline_cell_passes_through_an_extension_side_summary():
+    # A summary snapshot carries output_summary instead of outputs; keep it as is.
+    summary = [{"output_type": "execute_result", "mime_types": ["image/png"]}]
+    cell = {"cell_id": "c1", "index": 0, "cell_type": "code", "source": "plot()", "output_summary": summary}
+    assert _outline_cell(cell)["output_summary"] == summary
+
+
+def test_extract_images_collects_raster_payloads_in_document_order():
+    cell = {
+        "outputs": [
+            {"output_type": "stream", "name": "stdout", "text": "no data dict"},
+            {"output_type": "display_data", "data": {"image/png": ["QUJD", "REVG"], "text/plain": "fig1"}},
+            {"output_type": "execute_result", "data": {"image/svg+xml": "<svg/>", "image/jpeg": "R0lG"}},
+        ]
+    }
+    images = _extract_images(cell)
+    # multiline base64 is joined; SVG (text, not base64) is skipped
+    assert images == [("image/png", "QUJDREVG"), ("image/jpeg", "R0lG")]
+
+
+def test_extract_images_returns_empty_for_imageless_cells():
+    assert _extract_images({"outputs": [{"output_type": "stream", "text": "hi"}]}) == []
+    assert _extract_images({}) == []
 
 
 def test_cell_source_view_returns_source_without_outputs():
