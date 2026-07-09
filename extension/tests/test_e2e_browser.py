@@ -306,6 +306,112 @@ def test_a_second_tab_takes_over_and_the_first_stands_down(nbclassic_port):
     asyncio.run(scenario())
 
 
+def test_interrupt_kernel_stops_a_running_cell(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
+                await page.goto(url)
+                await mcp.recv_until(_extension_joined)
+                await _wait_for_live_kernel(page, nbclassic_port)
+
+                slow = await mcp.command(
+                    "insert_cell", {"index": 0, "cell_type": "code", "source": "import time; time.sleep(120)"}
+                )
+                running = mcp.send_cmd("execute_cell", {"cell_id": slow["cell_id"]})
+                await asyncio.sleep(1.0)  # let the kernel actually start the sleep
+
+                assert (await mcp.command("interrupt_kernel", {}))["status"] == "interrupt requested"
+                reply = await mcp.recv_until(lambda f: f.get("kind") == "reply" and f.get("id") == running, timeout=30)
+                assert reply.get("ok"), reply.get("error")
+                rendered = json.dumps(reply["result"]["outputs"])
+                assert "KeyboardInterrupt" in rendered
+
+                await mcp.command("delete_cell", {"cell_id": slow["cell_id"]})
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
+def test_dead_kernel_fails_fast_and_pushes_kernel_status(nbclassic_port):
+    # Uses its own notebook so killing the kernel cannot disturb tests sharing the seed notebook.
+    async def scenario():
+        doomed = "doomed.ipynb"
+        body = json.dumps({"type": "notebook", "format": "json", "content": _SEED_NOTEBOOK})
+        request = urllib.request.Request(
+            f"http://localhost:{nbclassic_port}/api/contents/{doomed}?token={TOKEN}",
+            data=body.encode(),
+            method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=5)
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            ws = await websocket_connect(f"ws://localhost:{nbclassic_port}/mcp-bridge?token={TOKEN}")
+            ws.write_message(
+                json.dumps({"kind": "hello", "protocol": PROTOCOL_VERSION, "role": "mcp", "notebook": doomed})
+            )
+            mcp = McpPeer(ws)
+            try:
+                await page.goto(f"http://localhost:{nbclassic_port}/notebooks/{doomed}?token={TOKEN}")
+                await mcp.recv_until(_extension_joined)
+                await _wait_for_live_kernel(page, nbclassic_port)
+
+                with urllib.request.urlopen(
+                    f"http://localhost:{nbclassic_port}/api/sessions?token={TOKEN}", timeout=5
+                ) as response:
+                    sessions = json.loads(response.read())
+                kernel_id = next(s["kernel"]["id"] for s in sessions if s["path"] == doomed)
+                kill = urllib.request.Request(
+                    f"http://localhost:{nbclassic_port}/api/kernels/{kernel_id}?token={TOKEN}", method="DELETE"
+                )
+                urllib.request.urlopen(kill, timeout=5)
+
+                pushed = await mcp.recv_until(
+                    lambda f: f.get("kind") == "event" and f.get("name") == "kernel_status", timeout=15
+                )
+                assert pushed["data"]["state"] in ("dead", "killed", "disconnected", "connection_failed")
+
+                cells = await mcp.command("snapshot", {})
+                start = time.time()
+                failed = mcp.send_cmd("execute_cell", {"cell_id": cells[0]["cell_id"]})
+                reply = await mcp.recv_until(lambda f: f.get("kind") == "reply" and f.get("id") == failed, timeout=10)
+                assert not reply.get("ok") and "kernel is not connected" in reply.get("error", "")
+                assert time.time() - start < 5  # fail fast, not the 120s execute timeout
+
+                info = await mcp.command("kernel_info", {})
+                assert not info["connected"]
+
+                interrupt = mcp.send_cmd("interrupt_kernel", {})
+                reply = await mcp.recv_until(
+                    lambda f: f.get("kind") == "reply" and f.get("id") == interrupt, timeout=10
+                )
+                assert not reply.get("ok") and "kernel is not connected" in reply.get("error", "")
+
+                # Restarting must push the recovery notification.
+                await page.evaluate("Jupyter.notebook.kernel.restart()")
+                await mcp.recv_until(
+                    lambda f: (
+                        f.get("kind") == "event"
+                        and f.get("name") == "kernel_status"
+                        and f["data"]["state"] in ("idle", "connected")
+                    ),
+                    timeout=30,
+                )
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_presence_ui_reflects_state_and_pause_blocks_commands(nbclassic_port):
     async def scenario():
         async with async_playwright() as pw:
