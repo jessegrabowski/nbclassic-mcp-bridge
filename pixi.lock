@@ -3147,6 +3147,7 @@ packages:
 - pypi: mcp_server
   name: nbclassic-mcp-bridge-mcp
   requires_dist:
+  - httpx>=0.27
   - mcp>=1.0
   - websockets>=12
   - pytest ; extra == 'test'

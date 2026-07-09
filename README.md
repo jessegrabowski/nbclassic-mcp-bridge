@@ -34,10 +34,11 @@ extension with Jupyter automatically.
    non-default environment, pass the absolute path in place of the trailing `nbclassic-mcp-bridge`
    (find it with `which nbclassic-mcp-bridge`). Any other MCP client works too — it just needs to
    run the `nbclassic-mcp-bridge` command with those two environment variables.
-3. Open a notebook in the browser. From the assistant, `use_notebook("<path>")` to attach,
-   then `read_notebook`, `insert_cell`, `set_cell_source`, `execute_cell`, `move_cell`,
-   `delete_cell` to drive it, `read_cell_image` to look at a plot, and `poll_events` to
-   see what you have changed.
+3. Open a notebook in the browser. From the assistant, `use_notebook()` attaches — with no
+   arguments it finds the open notebook by itself (`list_notebooks` shows what the server has
+   open, and inexact paths are resolved fuzzily). Then `read_notebook`, `insert_cell`,
+   `set_cell_source`, `execute_cell`, `move_cell`, `delete_cell` drive it, `read_cell_image`
+   shows a plot, and `poll_events` reports what you have changed.
 
 Two more optional environment variables: `ALLOW_IMG_OUTPUT=1` includes base64 image
 payloads in text responses (off by default — they are large and burn tokens; an output's
