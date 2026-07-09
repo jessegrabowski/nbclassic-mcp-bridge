@@ -159,7 +159,7 @@ def test_mcp_commands_drive_the_live_notebook(nbclassic_port):
             page = await browser.new_page()
             mcp = await McpPeer.connect(nbclassic_port)
             try:
-                url = f"http://localhost:{nbclassic_port}/nbclassic/notebooks/{NOTEBOOK}?token={TOKEN}"
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
                 await page.goto(url)
                 # main.js connecting is what makes the relay announce the extension peer.
                 await mcp.recv_until(_extension_joined)
@@ -205,7 +205,7 @@ def test_human_edits_surface_as_events(nbclassic_port):
             page = await browser.new_page()
             mcp = await McpPeer.connect(nbclassic_port)
             try:
-                url = f"http://localhost:{nbclassic_port}/nbclassic/notebooks/{NOTEBOOK}?token={TOKEN}"
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
                 await page.goto(url)
                 await mcp.recv_until(_extension_joined)
 
