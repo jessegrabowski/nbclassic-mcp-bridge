@@ -89,6 +89,13 @@ def test_outline_cell_summarizes_outputs_and_truncates_runaway_source():
     assert "truncated" in runaway["source"]
 
 
+def test_outline_cell_passes_through_an_extension_side_summary():
+    # A summary snapshot carries output_summary instead of outputs; keep it as is.
+    summary = [{"output_type": "execute_result", "mime_types": ["image/png"]}]
+    cell = {"cell_id": "c1", "index": 0, "cell_type": "code", "source": "plot()", "output_summary": summary}
+    assert _outline_cell(cell)["output_summary"] == summary
+
+
 def test_cell_source_view_returns_source_without_outputs():
     cell = {
         "cell_id": "c1",

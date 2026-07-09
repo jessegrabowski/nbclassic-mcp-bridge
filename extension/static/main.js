@@ -77,11 +77,48 @@ define([
         };
     }
 
+    function asText(value) {
+        return Array.isArray(value) ? value.join("") : String(value == null ? "" : value);
+    }
+
     // Every agent write must register itself in lastAgentWrite, or its debounced change event
     // echoes back to the assistant as a human edit.
     function writeAgentSource(cell, source) {
         cell.set_text(source);
         lastAgentWrite[cell.id] = source;
+    }
+
+    // Payload-free description of one output; mirrors the MCP server's _summarize_output.
+    function summarizeOutput(output) {
+        var kind = output.output_type;
+        if (kind === "stream") {
+            return { output_type: kind, name: output.name, chars: asText(output.text).length };
+        }
+        if (kind === "error") {
+            return { output_type: kind, ename: output.ename, evalue: output.evalue };
+        }
+        if (kind === "display_data" || kind === "execute_result") {
+            return { output_type: kind, mime_types: Object.keys(output.data || {}).sort() };
+        }
+        return { output_type: kind };
+    }
+
+    // Events carry a stub instead of megabytes of base64; read_cell still returns images on request.
+    // Each output from output_area.toJSON() is a shallow copy sharing its data dict with the live cell:
+    // replace the dict, never mutate its entries, or the stub corrupts the notebook itself.
+    function stripImagePayloads(outputs) {
+        outputs.forEach(function (output) {
+            var data = output.data;
+            if (!data) { return; }
+            var stripped = {};
+            Object.keys(data).forEach(function (mime) {
+                stripped[mime] = mime.indexOf("image/") === 0
+                    ? "<" + mime + " omitted from event; read the cell's outputs to fetch it>"
+                    : data[mime];
+            });
+            output.data = stripped;
+        });
+        return outputs;
     }
 
     // --- command dispatch --------------------------------------------------
@@ -108,8 +145,16 @@ define([
     function runOp(op, args, id) {
         var nb = Jupyter.notebook;
         switch (op) {
-        case "snapshot":
-            return nb.get_cells().map(cellToProto);
+        case "snapshot": {
+            var cells = nb.get_cells().map(cellToProto);
+            if (args.outputs === "summary") {
+                cells.forEach(function (cell) {
+                    cell.output_summary = cell.outputs.map(summarizeOutput);
+                    delete cell.outputs;
+                });
+            }
+            return cells;
+        }
         case "read_cell":
             return cellToProto(requireCell(args.cell_id));
         case "insert_cell": {
@@ -138,7 +183,7 @@ define([
         case "move_cell":
             return moveCell(args.cell_id, args.index);
         case "execute_cell":
-            executeCell(args.cell_id, id);
+            executeCell(args.cell_id, id, args.timeout_ms);
             return DEFERRED;
         default:
             throw new Error("unknown op: " + op);
@@ -166,7 +211,7 @@ define([
 
     // execute_cell is async: the reply waits for finished_execute.CodeCell so it
     // can carry real outputs.
-    function executeCell(cellId, id) {
+    function executeCell(cellId, id, timeoutMs) {
         var cell = requireCell(cellId);
         if (cell.cell_type !== "code") {
             cell.execute();
@@ -188,7 +233,7 @@ define([
             delete pendingExecutes[cellId];
             events.off("finished_execute.CodeCell", onFinished);
             sendFrame({ kind: "reply", id: id, ok: false, error: "execute_cell timed out" });
-        }, EXECUTE_TIMEOUT_MS);
+        }, timeoutMs > 0 ? timeoutMs : EXECUTE_TIMEOUT_MS);
         function onFinished(evt, data) {
             if (done || data.cell !== cell) { return; }
             done = true;
@@ -295,7 +340,10 @@ define([
                 delete pendingExecutes[data.cell.id];
                 return;
             }
-            emit("cell_executed", { cell_id: data.cell.id, outputs: cellOutputs(data.cell) });
+            emit("cell_executed", {
+                cell_id: data.cell.id,
+                outputs: stripImagePayloads(cellOutputs(data.cell)),
+            });
         });
         events.on("change.Cell", function (evt, data) {
             if (applying) { return; }

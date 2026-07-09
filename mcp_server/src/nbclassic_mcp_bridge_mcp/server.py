@@ -90,13 +90,19 @@ def _summarize_output(output: dict) -> dict:
 
 
 def _outline_cell(cell: dict) -> dict:
-    """Reduce a cell to truncated source plus a compact output summary."""
+    """Reduce a cell to truncated source plus a compact output summary.
+
+    Prefer an extension-side ``output_summary`` when present; otherwise summarize the full outputs here.
+    """
+    summary = cell.get("output_summary")
+    if summary is None:
+        summary = [_summarize_output(o) for o in cell.get("outputs", [])]
     return {
         "cell_id": cell.get("cell_id"),
         "index": cell.get("index"),
         "cell_type": cell.get("cell_type"),
         "source": _truncate(_as_text(cell.get("source", "")), _SOURCE_CHAR_LIMIT),
-        "output_summary": [_summarize_output(o) for o in cell.get("outputs", [])],
+        "output_summary": summary,
     }
 
 
@@ -158,13 +164,13 @@ async def use_project(path: str) -> str:
 
 
 @mcp.tool()
-async def read_notebook() -> list:
+async def read_notebook() -> list[dict]:
     """List every cell: id, index, type, source, and an output summary.
 
-    Source longer than ~16k chars is truncated; outputs are summarized, not
-    included -- call ``read_cell_source`` / ``read_cell_output`` for one cell.
+    Source longer than ~16k chars is truncated; outputs are summarized, not included -- call
+    ``read_cell_source`` / ``read_cell_output`` for one cell.
     """
-    cells = await _relay.command("snapshot", {})
+    cells = await _relay.command("snapshot", {"outputs": "summary"})
     return [_outline_cell(c) for c in cells]
 
 
@@ -207,9 +213,14 @@ async def set_cell_source(cell_id: str, source: str) -> dict:
 
 
 @mcp.tool()
-async def execute_cell(cell_id: str) -> dict:
-    """Execute a cell in the live UI and return its outputs (long text truncated)."""
-    return _cell_output_view(await _relay.command("execute_cell", {"cell_id": cell_id}), full=False)
+async def execute_cell(cell_id: str, timeout_s: float = 120) -> dict:
+    """Execute a cell in the live UI and return its outputs (long text truncated).
+
+    Raise a timeout error if the cell is still running after ``timeout_s`` seconds (the cell itself
+    keeps running). Default 120.
+    """
+    args = {"cell_id": cell_id, "timeout_ms": int(timeout_s * 1000)}
+    return _cell_output_view(await _relay.command("execute_cell", args), full=False)
 
 
 @mcp.tool()
