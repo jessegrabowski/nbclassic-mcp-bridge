@@ -27,7 +27,7 @@ Repository = "https://github.com/jessegrabowski/nbclassic-mcp-bridge"
 Issues = "https://github.com/jessegrabowski/nbclassic-mcp-bridge/issues"
 
 [project.optional-dependencies]
-test = ["pytest", "playwright", "nbclassic"]
+test = ["pytest", "pytest-randomly", "playwright", "nbclassic"]
 
 [tool.hatch.version]
 source = "vcs"

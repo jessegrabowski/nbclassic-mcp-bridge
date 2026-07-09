@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -65,11 +64,27 @@ def _wait_for_kernel(port, timeout=45):
     raise RuntimeError("no kernel became ready")
 
 
+async def _wait_for_live_kernel(page, port):
+    """Block until the kernel is running server-side and the page's kernel websocket is connected."""
+    _wait_for_kernel(port)
+    await page.wait_for_function(
+        "() => { var k = window.Jupyter && Jupyter.notebook && Jupyter.notebook.kernel;"
+        " return !!k && (!k.is_connected || k.is_connected()); }",
+        timeout=45000,
+    )
+
+
 @pytest.fixture(scope="module")
-def nbclassic_port():
-    """Run a real nbclassic server with the bridge extension; yield its port."""
+def nbclassic_port(tmp_path_factory):
+    """Run a real nbclassic server with the bridge extension; yield its port.
+
+    Tests share one seed notebook but stay order-independent because mutations live only in each
+    test's browser DOM: nothing ever saves, and nbclassic's 120s autosave never fires within the
+    module's runtime. A test that saves the notebook (or runs long enough to autosave) breaks
+    that invariant and must use its own notebook file.
+    """
     port = free_port()
-    nbdir = tempfile.mkdtemp()
+    nbdir = str(tmp_path_factory.mktemp("nbclassic"))
     Path(nbdir, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
     proc = subprocess.Popen(
         [
@@ -202,12 +217,7 @@ def test_mcp_commands_drive_the_live_notebook(nbclassic_port):
                 )
                 assert edited == "print('edited')"
 
-                _wait_for_kernel(nbclassic_port)
-                await page.wait_for_function(
-                    "() => { var k = window.Jupyter && Jupyter.notebook && Jupyter.notebook.kernel;"
-                    " return !!k && (!k.is_connected || k.is_connected()); }",
-                    timeout=45000,
-                )
+                await _wait_for_live_kernel(page, nbclassic_port)
                 result = await mcp.command("execute_cell", {"cell_id": created["cell_id"]}, timeout=60)
                 stdout = "".join(o.get("text", "") for o in result["outputs"] if o.get("output_type") == "stream")
                 assert "inserted" in stdout
@@ -238,12 +248,7 @@ def test_agent_commands_do_not_echo_as_events(nbclassic_port):
                 echoes = await mcp.drain_events(2.0)  # past the 400ms source debounce
                 assert echoes == [], [e["name"] for e in echoes]
 
-                _wait_for_kernel(nbclassic_port)
-                await page.wait_for_function(
-                    "() => { var k = window.Jupyter && Jupyter.notebook && Jupyter.notebook.kernel;"
-                    " return !!k && (!k.is_connected || k.is_connected()); }",
-                    timeout=45000,
-                )
+                await _wait_for_live_kernel(page, nbclassic_port)
                 await mcp.command("execute_cell", {"cell_id": cells[0]["cell_id"]}, timeout=60)
                 echoes = await mcp.drain_events(1.5)
                 assert echoes == [], [e["name"] for e in echoes]

@@ -190,6 +190,26 @@ def test_extension_present_reflects_the_relay_status_frame(joined):
     assert asyncio.run(scenario()) is joined
 
 
+def test_events_since_recovers_from_a_stale_cursor():
+    # An MCP restart resets the event log while an agent may still hold its old, larger cursor;
+    # the poll must come back empty with a usable cursor instead of hiding new events forever.
+    async def scenario():
+        events = [("cell_created", {"cell_id": "a"}), ("cell_deleted", {"cell_id": "a"})]
+        async with FakeRelay(events=events) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            await client.command("snapshot", {})  # barrier: events arrive first (FIFO)
+            stale, recovered_cursor = client.events_since(cursor=10_000)
+            fresh, _ = client.events_since(0)
+            await client.close()
+            return stale, recovered_cursor, fresh
+
+    stale, recovered_cursor, fresh = asyncio.run(scenario())
+    assert stale == []
+    assert recovered_cursor == 2
+    assert [e["name"] for e in fresh] == ["cell_created", "cell_deleted"]
+
+
 def test_command_reattaches_after_the_relay_drops_the_connection():
     async def scenario():
         async with FakeRelay(replies={"snapshot": {"ok": True, "result": "ok"}}) as relay:

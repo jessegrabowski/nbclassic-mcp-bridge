@@ -30,7 +30,7 @@ Issues = "https://github.com/jessegrabowski/nbclassic-mcp-bridge/issues"
 nbclassic-mcp-bridge = "nbclassic_mcp_bridge_mcp.server:main"
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest", "pytest-randomly"]
 
 [tool.hatch.version]
 source = "vcs"
