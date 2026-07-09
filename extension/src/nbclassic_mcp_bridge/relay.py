@@ -51,9 +51,14 @@ class BridgeHandler(WebSocketMixin, WebSocketHandler, JupyterHandler):
         except WebSocketClosedError:
             self.log.warning("nbclassic-mcp-bridge: dropped a frame, peer socket closed")
             return
-        # write_message's Future fails asynchronously if the socket closes
-        # mid-write; consume that outcome so asyncio does not log an orphaned task.
-        future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+
+        # write_message's Future fails asynchronously if the socket closes mid-write; observe
+        # that outcome (so asyncio does not log an orphaned task) and surface the dropped frame.
+        def log_write_failure(f):
+            if not f.cancelled() and f.exception() is not None:
+                self.log.warning("nbclassic-mcp-bridge: dropped a frame, write failed: %s", f.exception())
+
+        future.add_done_callback(log_write_failure)
 
     def check_xsrf_cookie(self):
         # WebSocket upgrades carry no XSRF cookie; auth is the token, enforced in pre_get.
