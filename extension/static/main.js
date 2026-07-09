@@ -10,6 +10,7 @@ define([
     var PROTOCOL_VERSION = 0;
     var SOURCE_DEBOUNCE_MS = 400;
     var EXECUTE_TIMEOUT_MS = 120000;
+    var INSPECT_TIMEOUT_MS = 30000;
     var RECONNECT_MIN_MS = 2000;
     var RECONNECT_MAX_MS = 30000;
 
@@ -209,6 +210,9 @@ define([
         case "execute_cell":
             executeCell(args.cell_id, id, args.timeout_ms);
             return DEFERRED;
+        case "inspect":
+            inspectKernel(args.code || "", id, args.timeout_ms);
+            return DEFERRED;
         case "interrupt_kernel":
             requireLiveKernel().interrupt();
             return { status: "interrupt requested" };
@@ -282,6 +286,67 @@ define([
         events.on("finished_execute.CodeCell", onFinished);
         cell.execute();
     }
+
+    // Evaluate code in the live kernel without touching cells or history: store_history keeps
+    // In[]/Out[] untouched and nothing renders in the notebook. The reply waits for both the shell
+    // reply (carrying ok/error) and the iopub idle status (after which no more outputs can arrive).
+    function inspectKernel(code, id, timeoutMs) {
+        var kernel = requireLiveKernel();
+        var outputs = [];
+        var shellStatus = null;
+        var idleSeen = false;
+        var done = false;
+        var timer = setTimeout(function () {
+            if (done) { return; }
+            done = true;
+            sendFrame({ kind: "reply", id: id, ok: false, error: "inspect timed out" });
+        }, timeoutMs > 0 ? timeoutMs : INSPECT_TIMEOUT_MS);
+        function maybeFinish() {
+            if (done || !idleSeen || shellStatus === null) { return; }
+            done = true;
+            clearTimeout(timer);
+            sendFrame({ kind: "reply", id: id, ok: true,
+                        result: { status: shellStatus, outputs: outputs } });
+        }
+        var callbacks = {
+            shell: {
+                reply: function (msg) {
+                    shellStatus = msg.content.status;
+                    maybeFinish();
+                },
+            },
+            iopub: {
+                output: function (msg) {
+                    var type = msg.header.msg_type;
+                    var content = msg.content;
+                    if (type === "stream") {
+                        outputs.push({ output_type: type, name: content.name, text: content.text });
+                    } else if (type === "error") {
+                        outputs.push({ output_type: type, ename: content.ename,
+                                       evalue: content.evalue, traceback: content.traceback });
+                    } else if (type === "execute_result" || type === "display_data") {
+                        outputs.push({ output_type: type, data: content.data || {} });
+                    }
+                },
+                status: function (msg) {
+                    if (msg.content.execution_state === "idle") {
+                        idleSeen = true;
+                        maybeFinish();
+                    }
+                },
+            },
+        };
+        try {
+            kernel.execute(code, callbacks, { silent: false, store_history: false, stop_on_error: false });
+        } catch (e) {
+            // applyCommand replies with this error; without the cleanup the timer would send a
+            // second, bogus "timed out" reply for the same id.
+            done = true;
+            clearTimeout(timer);
+            throw e;
+        }
+    }
+
 
     function relayUrl() {
         var loc = window.location;

@@ -312,6 +312,21 @@ async def execute_cell(cell_id: str, timeout_s: float = 120) -> dict:
 
 
 @mcp.tool()
+async def inspect_kernel(code: str, timeout_s: float = 30, full: bool = False) -> dict:
+    """Evaluate code in the notebook's live kernel without touching cells, outputs, or history.
+
+    Nothing appears in the notebook and the In[]/Out[] counters are unchanged, so use this to look
+    at state -- ``df.shape``, ``data.columns``, ``locals().keys()`` -- rather than to do work the
+    human should see. Returns ``{status, outputs}``; long text is truncated unless ``full`` is
+    true. Default timeout 30.
+    """
+    result = await _relay.command("inspect", {"code": code, "timeout_ms": int(timeout_s * 1000)})
+    for output in result.get("outputs", []):
+        _clean_output(output, truncate=not full)
+    return result
+
+
+@mcp.tool()
 async def interrupt_kernel() -> dict:
     """Send a KeyboardInterrupt to the notebook's kernel.
 

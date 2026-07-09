@@ -306,6 +306,56 @@ def test_a_second_tab_takes_over_and_the_first_stands_down(nbclassic_port):
     asyncio.run(scenario())
 
 
+def test_inspect_evaluates_without_touching_the_notebook(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                url = f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}"
+                await page.goto(url)
+                await mcp.recv_until(_extension_joined)
+                await _wait_for_live_kernel(page, nbclassic_port)
+
+                info = await mcp.command("kernel_info", {})
+                assert info["connected"] and info["state"] in ("idle", "busy")
+
+                cells_before = await mcp.command("snapshot", {})
+
+                code = "sentinel = 20 + 22\nprint('inspected')\nsentinel"
+                result = await mcp.command("inspect", {"code": code}, timeout=30)
+                assert result["status"] == "ok"
+                assert any(
+                    o.get("output_type") == "execute_result" and o.get("data", {}).get("text/plain") == "42"
+                    for o in result["outputs"]
+                )
+                assert any(
+                    o.get("output_type") == "stream" and "inspected" in o.get("text", "") for o in result["outputs"]
+                )
+
+                failure = await mcp.command("inspect", {"code": "1 / 0"}, timeout=30)
+                assert failure["status"] == "error"
+                assert any(o.get("ename") == "ZeroDivisionError" for o in failure["outputs"])
+
+                # No cell was created, no output rendered, no event emitted.
+                cells_after = await mcp.command("snapshot", {})
+                assert cells_after == cells_before
+                assert await mcp.drain_events(1.0) == []
+
+                # Last, so the still-sleeping kernel cannot delay this test's other assertions.
+                timed_out = mcp.send_cmd("inspect", {"code": "import time; time.sleep(5)", "timeout_ms": 500})
+                reply = await mcp.recv_until(
+                    lambda f: f.get("kind") == "reply" and f.get("id") == timed_out, timeout=10
+                )
+                assert not reply.get("ok") and "timed out" in reply.get("error", "")
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_interrupt_kernel_stops_a_running_cell(nbclassic_port):
     async def scenario():
         async with async_playwright() as pw:
