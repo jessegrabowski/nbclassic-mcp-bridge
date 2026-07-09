@@ -228,9 +228,10 @@ async def move_cell(cell_id: str, index: int) -> dict:
 async def poll_events(cursor: int = 0) -> dict:
     """Return the human's notebook edits since ``cursor``.
 
-    Pass 0 on the first call, then feed the returned ``cursor`` back to get only
-    newer events. Each event is ``{name, data}`` -- one of cell_created,
-    cell_deleted, cell_moved, cell_executed, source_changed, focus_changed.
+    Pass 0 on the first call, then feed the returned ``cursor`` back to get only newer events. Each
+    event is ``{name, data}`` -- one of cell_created, cell_deleted, cell_moved, cell_executed,
+    source_changed, focus_changed -- and reflects the human's actions only (your own commands are
+    not echoed back).
     """
     events, new_cursor = _relay.events_since(cursor)
     return _clean_event_outputs({"events": events, "cursor": new_cursor})
