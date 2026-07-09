@@ -38,6 +38,9 @@ class Switchboard:
         except (ValueError, TypeError):
             peer.close(1003, "expected a JSON text frame")
             return
+        if not isinstance(msg, dict):
+            peer.close(1003, "expected a JSON object frame")
+            return
 
         kind = msg.get("kind")
         if kind == "hello":
