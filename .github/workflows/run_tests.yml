@@ -1,0 +1,55 @@
+name: run_tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancels all previous workflow runs for pull requests that have not completed.
+concurrency:
+  # The concurrency group contains the workflow name and the branch name for pull requests
+  # or the commit hash for any other events.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - subset-name: "Unit and integration"
+            task: unit
+
+          - subset-name: "Browser e2e"
+            task: e2e
+
+    name: ${{ matrix.subset-name }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # hatch-vcs derives both package versions from git history
+          fetch-depth: 0
+
+      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          cache: true
+
+      - name: Install playwright browsers
+        if: matrix.task == 'e2e'
+        run: pixi run install-browsers
+
+      - name: Run tests
+        run: pixi run ${{ matrix.task }} -vv --durations=20
+
+  all-checks:
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    name: "All tests"
+    needs: [test]
+    steps:
+      - name: Check build matrix status
+        if: ${{ needs.test.result != 'success' }}
+        run: exit 1
