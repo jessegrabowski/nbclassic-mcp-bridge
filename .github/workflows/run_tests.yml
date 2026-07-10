@@ -42,7 +42,8 @@ jobs:
 
       - name: Install playwright browsers
         if: matrix.task == 'e2e'
-        run: pixi run install-browsers
+        # --with-deps pulls the OS libraries Chromium needs on a bare ubuntu runner.
+        run: pixi run -- playwright install --with-deps chromium
 
       - name: Run tests
         run: >
