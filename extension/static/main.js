@@ -10,6 +10,7 @@ define([
     var PROTOCOL_VERSION = 0;
     var SOURCE_DEBOUNCE_MS = 400;
     var EXECUTE_TIMEOUT_MS = 120000;
+    var INSPECT_TIMEOUT_MS = 30000;
     var RECONNECT_MIN_MS = 2000;
     var RECONNECT_MAX_MS = 30000;
 
@@ -23,6 +24,7 @@ define([
     var ws = null;
     var evicted = false;            // stood down after another tab took the room
     var paused = false;             // human suspended the bridge; cmds rejected, no events emitted
+    var kernelState = "unknown";    // last kernel lifecycle event seen; drives fail-fast messages
     var assistantConnected = false; // an mcp peer shares the room (tracked from status frames)
     var applying = false;           // an mcp command is mutating the notebook; suppress the event echo
     var pendingExecutes = {};       // cell_id -> true while an mcp execute_cell awaits its finish
@@ -133,6 +135,14 @@ define([
     }
 
 
+    function requireLiveKernel() {
+        var kernel = Jupyter.notebook.kernel;
+        if (!kernel || (kernel.is_connected && !kernel.is_connected())) {
+            throw new Error("kernel is not connected (state: " + kernelState + ")");
+        }
+        return kernel;
+    }
+
     // runOp executes with the echo of its own mutations suppressed: the create/delete/change handlers
     // it triggers fire synchronously inside it; the asynchronous cell_executed echo is handled by
     // pendingExecutes instead.
@@ -200,6 +210,20 @@ define([
         case "execute_cell":
             executeCell(args.cell_id, id, args.timeout_ms);
             return DEFERRED;
+        case "inspect":
+            inspectKernel(args.code || "", id, args.timeout_ms);
+            return DEFERRED;
+        case "interrupt_kernel":
+            requireLiveKernel().interrupt();
+            return { status: "interrupt requested" };
+        case "kernel_info": {
+            var kernel = nb.kernel;
+            return {
+                state: kernelState,
+                connected: !!(kernel && (!kernel.is_connected || kernel.is_connected())),
+                kernel_name: kernel ? kernel.name : null,
+            };
+        }
         default:
             throw new Error("unknown op: " + op);
         }
@@ -235,6 +259,7 @@ define([
                         result: { cell_id: cellId, outputs: [] } });
             return;
         }
+        requireLiveKernel();
         // A second execute while one is in flight would double-subscribe onFinished and resolve both
         // replies with the first run's outputs.
         if (pendingExecutes[cellId]) {
@@ -260,6 +285,66 @@ define([
         }
         events.on("finished_execute.CodeCell", onFinished);
         cell.execute();
+    }
+
+    // Evaluate code in the live kernel without touching cells or history: store_history keeps
+    // In[]/Out[] untouched and nothing renders in the notebook. The reply waits for both the shell
+    // reply (carrying ok/error) and the iopub idle status (after which no more outputs can arrive).
+    function inspectKernel(code, id, timeoutMs) {
+        var kernel = requireLiveKernel();
+        var outputs = [];
+        var shellStatus = null;
+        var idleSeen = false;
+        var done = false;
+        var timer = setTimeout(function () {
+            if (done) { return; }
+            done = true;
+            sendFrame({ kind: "reply", id: id, ok: false, error: "inspect timed out" });
+        }, timeoutMs > 0 ? timeoutMs : INSPECT_TIMEOUT_MS);
+        function maybeFinish() {
+            if (done || !idleSeen || shellStatus === null) { return; }
+            done = true;
+            clearTimeout(timer);
+            sendFrame({ kind: "reply", id: id, ok: true,
+                        result: { status: shellStatus, outputs: outputs } });
+        }
+        var callbacks = {
+            shell: {
+                reply: function (msg) {
+                    shellStatus = msg.content.status;
+                    maybeFinish();
+                },
+            },
+            iopub: {
+                output: function (msg) {
+                    var type = msg.header.msg_type;
+                    var content = msg.content;
+                    if (type === "stream") {
+                        outputs.push({ output_type: type, name: content.name, text: content.text });
+                    } else if (type === "error") {
+                        outputs.push({ output_type: type, ename: content.ename,
+                                       evalue: content.evalue, traceback: content.traceback });
+                    } else if (type === "execute_result" || type === "display_data") {
+                        outputs.push({ output_type: type, data: content.data || {} });
+                    }
+                },
+                status: function (msg) {
+                    if (msg.content.execution_state === "idle") {
+                        idleSeen = true;
+                        maybeFinish();
+                    }
+                },
+            },
+        };
+        try {
+            kernel.execute(code, callbacks, { silent: false, store_history: false, stop_on_error: false });
+        } catch (e) {
+            // applyCommand replies with this error; without the cleanup the timer would send a
+            // second, bogus "timed out" reply for the same id.
+            done = true;
+            clearTimeout(timer);
+            throw e;
+        }
     }
 
 
@@ -385,6 +470,49 @@ define([
         });
     }
 
+    // Lifecycle states worth pushing to the assistant: failures, and the recovery after one.
+    // Routine busy/idle flips would double the event traffic of every execution, so they only
+    // update kernelState for kernel_info and fail-fast messages.
+    var KERNEL_EVENTS = {
+        "kernel_starting.Kernel": "starting",
+        "kernel_connected.Kernel": "connected",
+        "kernel_ready.Kernel": "idle",
+        "kernel_busy.Kernel": "busy",
+        "kernel_idle.Kernel": "idle",
+        "kernel_interrupting.Kernel": "interrupting",
+        "kernel_restarting.Kernel": "restarting",
+        "kernel_autorestarting.Kernel": "autorestarting",
+        "kernel_reconnecting.Kernel": "reconnecting",
+        "kernel_disconnected.Kernel": "disconnected",
+        "kernel_connection_failed.Kernel": "connection_failed",
+        "kernel_dead.Kernel": "dead",
+        "kernel_killed.Kernel": "killed",
+    };
+    var KERNEL_ALERT_STATES = {
+        autorestarting: true, disconnected: true, connection_failed: true, dead: true, killed: true,
+    };
+
+    // The alert sticks until the kernel is operational again: intermediate lifecycle states
+    // (starting, reconnecting) land between a failure and idle, so comparing against the previous
+    // state alone would drop the recovery notification.
+    var kernelAlertActive = false;
+
+    function wireKernelEvents() {
+        Object.keys(KERNEL_EVENTS).forEach(function (eventName) {
+            events.on(eventName, function () {
+                var state = KERNEL_EVENTS[eventName];
+                kernelState = state;
+                if (KERNEL_ALERT_STATES[state]) {
+                    kernelAlertActive = true;
+                    emit("kernel_status", { state: state });
+                } else if (kernelAlertActive && (state === "idle" || state === "connected")) {
+                    kernelAlertActive = false;
+                    emit("kernel_status", { state: state });
+                }
+            });
+        });
+    }
+
     // One toolbar control doubles as the status light and the pause toggle. data-state carries the
     // machine-readable state for styling and tests: assistant | ready | paused | disconnected.
     var STATUS_UI = {
@@ -470,6 +598,7 @@ define([
     function init() {
         connect();
         wireEvents();
+        wireKernelEvents();
         try {
             patchMoves();
         } catch (e) {
