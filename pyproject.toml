@@ -34,15 +34,20 @@ nbclassic = ">=1.3"
 nbclassic-mcp-bridge = { path = "extension", editable = true }
 nbclassic-mcp-bridge-mcp = { path = "mcp_server", editable = true }
 
+[tool.pixi.feature.test.dependencies]
+nodejs = ">=22"
+
 [tool.pixi.feature.test.pypi-dependencies]
 pytest = "*"
+pytest-cov = "*"
 pytest-randomly = "*"
 playwright = "*"
 
 [tool.pixi.feature.test.tasks]
 unit = "pytest -m 'not e2e'"
 e2e = "pytest -m e2e"
-tests = { depends-on = ["unit", "e2e"] }
+js-test = "node --test extension/tests/js/*.test.js"
+tests = { depends-on = ["unit", "js-test", "e2e"] }
 install-browsers = "playwright install chromium"
 
 [tool.pixi.feature.lint.dependencies]

@@ -239,8 +239,9 @@ define([
         var type = cell.cell_type;
         var wasRendered = cell.rendered;
         nb.delete_cell(from);
-        var dest = index > from ? index - 1 : index;
-        var moved = nb.insert_cell_at_index(type, dest);
+        // Deleting at `from` already shifted later cells left, so inserting at the requested index
+        // lands the cell at exactly that final index.
+        var moved = nb.insert_cell_at_index(type, index);
         moved.fromJSON(json);
         lastAgentWrite[cellId] = moved.get_text();
         // The reinserted cell starts unrendered; keep the view it had.

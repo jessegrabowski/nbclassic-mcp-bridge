@@ -35,7 +35,7 @@ Issues = "https://github.com/jessegrabowski/nbclassic-mcp-bridge/issues"
 nbclassic-mcp-bridge = "nbclassic_mcp_bridge_mcp.server:main"
 
 [project.optional-dependencies]
-test = ["pytest", "pytest-randomly"]
+test = ["pytest", "pytest-cov", "pytest-randomly"]
 
 [tool.hatch.version]
 source = "vcs"
@@ -43,6 +43,7 @@ raw-options = { root = ".." }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["e2e: end-to-end test; needs playwright + chromium + nbclassic (deselect with -m 'not e2e')"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nbclassic_mcp_bridge_mcp"]
