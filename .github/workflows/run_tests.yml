@@ -57,14 +57,40 @@ jobs:
           name: coverage-${{ matrix.task }}
           path: coverage/coverage-${{ matrix.task }}.xml
 
+  js-test:
+    name: "Extension JS tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+
+      - name: Run JS tests with coverage
+        run: |
+          mkdir -p coverage
+          node --test --experimental-test-coverage --test-coverage-exclude='extension/tests/**' \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=lcov --test-reporter-destination=coverage/coverage-js.lcov \
+            extension/tests/js/*.test.js
+
+      - name: Upload coverage file
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-js
+          path: coverage/coverage-js.lcov
+
   all-checks:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     name: "All tests"
-    needs: [test]
+    needs: [test, js-test]
     steps:
       - name: Check build matrix status
-        if: ${{ needs.test.result != 'success' }}
+        if: ${{ needs.test.result != 'success' || needs.js-test.result != 'success' }}
         run: exit 1
 
   upload-coverage:
@@ -84,9 +110,27 @@ jobs:
           path: coverage
           merge-multiple: true
 
-      - name: Upload coverage to Codecov
+      # Move the JS lcov out so the Python upload's directory search sees only cobertura XMLs.
+      - name: Separate JS coverage from Python reports
+        run: |
+          mkdir -p coverage-js
+          mv coverage/coverage-js.lcov coverage-js/
+
+      - name: Upload Python coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: jessegrabowski/nbclassic-mcp-bridge
           directory: ./coverage/
           fail_ci_if_error: true
+          flags: python
+
+      - name: Upload JS coverage to Codecov
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          slug: jessegrabowski/nbclassic-mcp-bridge
+          files: coverage-js/coverage-js.lcov
+          disable_search: true
+          fail_ci_if_error: true
+          flags: javascript
