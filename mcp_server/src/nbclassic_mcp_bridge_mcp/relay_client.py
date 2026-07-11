@@ -39,6 +39,10 @@ class RelayClient:
         self._reader_task: asyncio.Task | None = None
         self._seq = itertools.count(1)
         self._event_log: deque[tuple[int, dict]] = deque(maxlen=_EVENT_LOG_MAXLEN)
+        # Where this client stands in the relay's per-room event numbering; sent in the hello so
+        # the relay replays exactly the events missed while detached, and nothing twice.
+        self._relay_log_id: str | None = None
+        self._last_relay_seq = 0
         # Serializes connect/close/reattach so concurrent commands cannot tear down each other's sockets.
         self._conn_lock = asyncio.Lock()
         self._extension_joined = asyncio.Event()
@@ -139,6 +143,10 @@ class RelayClient:
     async def _dial(self, notebook: str) -> None:
         """Open the socket, send the hello, and start the reader. Caller holds the lock."""
         self._extension_joined.clear()
+        if notebook != self._notebook:
+            # Event numbering is per room; a stale position from another notebook means nothing.
+            self._relay_log_id = None
+            self._last_relay_seq = 0
         self._ws = await websockets.connect(self._relay_url(), max_size=_MAX_FRAME_BYTES)
         await self._ws.send(
             json.dumps(
@@ -147,6 +155,8 @@ class RelayClient:
                     "protocol": PROTOCOL_VERSION,
                     "role": "mcp",
                     "notebook": notebook,
+                    "last_event_seq": self._last_relay_seq,
+                    "log_id": self._relay_log_id,
                 }
             )
         )
@@ -206,7 +216,8 @@ class RelayClient:
                     if fut is not None and not fut.done():
                         fut.set_result(msg)
                 elif kind == "event":
-                    self._event_log.append((next(self._seq), msg))
+                    if self._accept_event(msg):
+                        self._event_log.append((next(self._seq), msg))
                 elif kind == "status" and msg.get("peer") == "extension":
                     if msg.get("state") == "joined":
                         self._extension_joined.set()
@@ -223,6 +234,20 @@ class RelayClient:
             else:
                 log.info("relay connection closed")
             self._fail_pending(ConnectionError("relay connection lost"))
+
+    def _accept_event(self, msg: dict) -> bool:
+        """Track the relay's event stamps and drop replayed duplicates; unstamped events pass."""
+        seq = msg.pop("seq", None)
+        log_id = msg.pop("log_id", None)
+        if seq is None:
+            return True
+        if log_id != self._relay_log_id:
+            self._relay_log_id = log_id
+            self._last_relay_seq = 0
+        if seq <= self._last_relay_seq:
+            return False
+        self._last_relay_seq = seq
+        return True
 
     def _fail_pending(self, exc: Exception) -> None:
         """Resolve every awaiting command with ``exc`` so callers never hang."""

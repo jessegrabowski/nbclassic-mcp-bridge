@@ -15,13 +15,15 @@ class FakeRelay:
     """A scriptable stand-in for the relay, exposed as an async context manager.
 
     Records every ``hello`` it receives, answers each ``cmd`` from the ``replies`` table (op ->
-    reply spec, or ``DROP`` to stay silent), and pushes the frames in ``events`` on each handshake.
+    reply spec, or ``DROP`` to stay silent), and serves the frames in ``events`` through the same
+    stamp-and-replay protocol as the real switchboard.
     """
 
-    def __init__(self, replies=None, events=None, extension_joined=False):
+    def __init__(self, replies=None, events=None, extension_joined=False, log_id="fake-log"):
         self.replies = replies or {}
         self.events = events or []
         self.extension_joined = extension_joined
+        self.log_id = log_id
         self.hellos: list[dict] = []
         self._server = None
         self._connections: set = set()
@@ -54,8 +56,20 @@ class FakeRelay:
                     self.hellos.append(msg)
                     if self.extension_joined:
                         await ws.send(json.dumps({"kind": "status", "peer": "extension", "state": "joined"}))
-                    for name, data in self.events:
-                        await ws.send(json.dumps({"kind": "event", "name": name, "data": data}))
+                    last_seen = msg.get("last_event_seq", 0) if msg.get("log_id") == self.log_id else 0
+                    for seq, (name, data) in enumerate(self.events, start=1):
+                        if seq > last_seen:
+                            await ws.send(
+                                json.dumps(
+                                    {
+                                        "kind": "event",
+                                        "name": name,
+                                        "data": data,
+                                        "seq": seq,
+                                        "log_id": self.log_id,
+                                    }
+                                )
+                            )
                 elif msg["kind"] == "cmd":
                     spec = self.replies.get(msg["op"], {"ok": True, "result": None})
                     if spec is DROP:
@@ -79,6 +93,8 @@ def test_connect_sends_a_well_formed_hello():
         "protocol": PROTOCOL_VERSION,
         "role": "mcp",
         "notebook": "nb.ipynb",
+        "last_event_seq": 0,
+        "log_id": None,
     }
 
 
@@ -240,3 +256,79 @@ def test_large_reply_survives_the_websockets_size_limit():
             return got
 
     assert asyncio.run(scenario()) == big
+
+
+def test_reattach_does_not_duplicate_replayed_events():
+    async def scenario():
+        events = [("cell_created", {"cell_id": "a"}), ("cell_deleted", {"cell_id": "a"})]
+        async with FakeRelay(replies={"snapshot": {"ok": True, "result": None}}, events=events) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            await client.command("snapshot", {})  # barrier: replay lands first
+            first, cursor = client.events_since(0)
+
+            await relay.kick()
+            await client.command("snapshot", {})  # reattaches; hello carries the last seen seq
+            fresh, _ = client.events_since(cursor)
+            await client.close()
+            return first, fresh, relay.hellos
+
+    first, fresh, hellos = asyncio.run(scenario())
+    assert [event["name"] for event in first] == ["cell_created", "cell_deleted"]
+    assert fresh == []
+    assert hellos[-1]["last_event_seq"] == 2
+    assert hellos[-1]["log_id"] == "fake-log"
+
+
+def test_a_new_relay_log_resets_the_dedup_position():
+    # A restarted relay numbers from 1 again under a new log_id; those events must not be
+    # mistaken for already-seen ones.
+    async def scenario():
+        events = [("cell_created", {"cell_id": "a"}), ("cell_deleted", {"cell_id": "a"})]
+        async with FakeRelay(replies={"snapshot": {"ok": True, "result": None}}, events=events) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            await client.command("snapshot", {})
+            _, cursor = client.events_since(0)
+
+            await relay.kick()
+            relay.log_id = "reborn-log"  # same events, renumbered by a "restarted" relay
+            await client.command("snapshot", {})
+            replayed, _ = client.events_since(cursor)
+            await client.close()
+            return replayed
+
+    replayed = asyncio.run(scenario())
+    assert [event["name"] for event in replayed] == ["cell_created", "cell_deleted"]
+
+
+def test_stamps_never_reach_the_agent_facing_event_log():
+    async def scenario():
+        async with FakeRelay(events=[("cell_created", {"cell_id": "a"})]) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            await client.command("snapshot", {})
+            logged, _ = client.events_since(0)
+            await client.close()
+            return logged
+
+    logged = asyncio.run(scenario())
+    assert logged == [{"kind": "event", "name": "cell_created", "data": {"cell_id": "a"}}]
+
+
+def test_switching_notebooks_resets_the_replay_position():
+    # A position learned in one room means nothing in another; carrying it over would make the
+    # relay silently skip the new room's buffered events.
+    async def scenario():
+        events = [("cell_created", {"cell_id": "a"})]
+        async with FakeRelay(replies={"snapshot": {"ok": True, "result": None}}, events=events) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("a.ipynb")
+            await client.command("snapshot", {})  # consume the replay; position advances to 1
+            await client.connect("b.ipynb")
+            await client.close()
+            return relay.hellos
+
+    hellos = asyncio.run(scenario())
+    assert hellos[0]["last_event_seq"] == 0
+    assert hellos[1]["last_event_seq"] == 0 and hellos[1]["log_id"] is None
