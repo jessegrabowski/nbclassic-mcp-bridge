@@ -34,6 +34,7 @@ define([
     var dirtyCells = {};            // cell_id -> true, awaiting a debounced source_changed
     var lastAgentWrite = {};        // cell_id -> source the mcp side last wrote, to drop its echo
     var undoStack = [];             // inverses of agent mutations, newest last; see recordUndo
+    var reloading = false;          // notebook repopulation in flight; suppress its event storm
     var debounceTimer = null;
 
 
@@ -296,6 +297,15 @@ define([
             }
             return { results: results };
         }
+        case "reload_notebook":
+            undoStack = [];
+            lastAgentWrite = {};
+            dirtyCells = {};
+            focusedCellId = null;
+            reloading = true;
+            events.one("notebook_loaded.Notebook", function () { reloading = false; });
+            nb.load_notebook(nb.notebook_path);
+            return { status: "reloading" };
         case "kernel_info": {
             var kernel = nb.kernel;
             return {
@@ -508,7 +518,7 @@ define([
 
     function wireEvents() {
         events.on("create.Cell", function (evt, data) {
-            if (applying) { return; }
+            if (applying || reloading) { return; }
             emit("cell_created", {
                 cell_id: data.cell.id,
                 index: data.index,
@@ -517,7 +527,7 @@ define([
             });
         });
         events.on("delete.Cell", function (evt, data) {
-            if (applying) { return; }
+            if (applying || reloading) { return; }
             emit("cell_deleted", { cell_id: data.cell.id });
         });
         events.on("finished_execute.CodeCell", function (evt, data) {
@@ -533,7 +543,7 @@ define([
             });
         });
         events.on("change.Cell", function (evt, data) {
-            if (applying) { return; }
+            if (applying || reloading) { return; }
             dirtyCells[data.cell.id] = true;
             if (debounceTimer) { clearTimeout(debounceTimer); }
             debounceTimer = setTimeout(flushDirty, SOURCE_DEBOUNCE_MS);

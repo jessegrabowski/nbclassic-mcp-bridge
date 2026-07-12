@@ -260,6 +260,31 @@ test("the undo stack is bounded", () => {
 });
 
 
+test("reload_notebook does not spray phantom events during repopulation", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "reload_notebook", args: {} });
+    assert.equal(lastReply(socket, 1).result.status, "reloading");
+    t.mock.timers.tick(5000); // repopulation happens after the reply
+    assert.deepEqual(eventsSent(socket, "cell_created"), []);
+});
+
+test("reload_notebook clears stale focus so set_source is not wrongly skipped", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    bridge.events.trigger("edit_mode.Cell", { cell: bridge.cells[0] });
+    socket.receive({ kind: "cmd", id: 1, op: "reload_notebook", args: {} });
+    t.mock.timers.tick(5000);
+
+    socket.receive({ kind: "cmd", id: 2, op: "set_source", args: { cell_id: "c1", source: "after reload" } });
+    assert.equal(lastReply(socket, 2).result.status, "written");
+});
+
+
 test("undo guards refuse to delete or move cells the human drifted", () => {
     const bridge = loadBridge();
     const socket = connect(bridge);

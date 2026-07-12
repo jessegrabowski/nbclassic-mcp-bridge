@@ -1,4 +1,5 @@
 from pathlib import PurePosixPath
+from urllib.parse import quote
 
 import httpx
 
@@ -78,16 +79,43 @@ def match_notebook(requested: str, available: list[str]) -> tuple[str | None, li
     return None, []
 
 
+async def create_checkpoint(jupyter_url: str, token: str, path: str) -> dict:
+    """Create a Jupyter checkpoint of ``path``'s saved file; return the checkpoint record.
+
+    Overwrites the file's single default checkpoint slot -- the same one the notebook UI's
+    "Save and Checkpoint" uses.
+    """
+    return await _post_json(jupyter_url, f"api/contents/{quote(path)}/checkpoints", token)
+
+
+async def restore_checkpoint(jupyter_url: str, token: str, path: str, checkpoint_id: str) -> None:
+    """Revert ``path``'s file on disk to ``checkpoint_id``. The browser buffer is untouched."""
+    await _post_json(jupyter_url, f"api/contents/{quote(path)}/checkpoints/{quote(checkpoint_id)}", token)
+
+
+async def list_checkpoints(jupyter_url: str, token: str, path: str) -> list[dict]:
+    """Return the checkpoints recorded for ``path``."""
+    return await _get_json(jupyter_url, f"api/contents/{quote(path)}/checkpoints", token)
+
+
 async def _get_json(jupyter_url: str, endpoint: str, token: str):
     # The token travels in an Authorization header, never in the URL: httpx status errors embed
     # the full URL in their message, which surfaces in agent-facing tool errors and logs.
+    return await _request_json("GET", jupyter_url, endpoint, token)
+
+
+async def _post_json(jupyter_url: str, endpoint: str, token: str):
+    return await _request_json("POST", jupyter_url, endpoint, token)
+
+
+async def _request_json(method: str, jupyter_url: str, endpoint: str, token: str):
     url = f"{jupyter_url.rstrip('/')}/{endpoint}"
     headers = {"Authorization": f"token {token}"} if token else {}
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client:
-            response = await client.get(url, headers=headers)
+            response = await client.request(method, url, headers=headers)
             response.raise_for_status()
-            return response.json()
+            return response.json() if response.content else None
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise  # fetch_rooms distinguishes a missing endpoint from a failure

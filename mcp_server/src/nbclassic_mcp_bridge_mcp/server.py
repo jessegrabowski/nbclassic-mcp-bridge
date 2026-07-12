@@ -380,6 +380,35 @@ async def undo_all_changes() -> dict:
 
 
 @mcp.tool()
+async def checkpoint_notebook() -> dict:
+    """Checkpoint the attached notebook's saved file as a restore point.
+
+    Uses Jupyter's single default checkpoint slot -- the same one the human's "Save and
+    Checkpoint" writes -- so create one deliberately, not routinely.
+    """
+    if _relay.notebook is None:
+        raise RuntimeError("not attached -- call use_notebook first")
+    return await discovery.create_checkpoint(_relay.jupyter_url, _relay.token, _relay.notebook)
+
+
+@mcp.tool()
+async def restore_notebook_checkpoint() -> str:
+    """Revert the attached notebook to its checkpoint and reload it in the browser.
+
+    DESTRUCTIVE: the file on disk reverts to the checkpoint and the browser tab reloads from disk,
+    discarding any unsaved edits (the human's included). Confirm with the human first.
+    """
+    if _relay.notebook is None:
+        raise RuntimeError("not attached -- call use_notebook first")
+    checkpoints = await discovery.list_checkpoints(_relay.jupyter_url, _relay.token, _relay.notebook)
+    if not checkpoints:
+        raise RuntimeError(f"no checkpoint exists for {_relay.notebook}; call checkpoint_notebook first")
+    await discovery.restore_checkpoint(_relay.jupyter_url, _relay.token, _relay.notebook, checkpoints[0]["id"])
+    await _relay.command("reload_notebook", {})
+    return f"restored {_relay.notebook} to checkpoint {checkpoints[0]['id']} and reloaded the browser tab"
+
+
+@mcp.tool()
 async def poll_events(cursor: int = 0) -> dict:
     """Return the human's notebook edits since ``cursor``.
 
