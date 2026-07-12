@@ -312,6 +312,21 @@ async def execute_cell(cell_id: str, timeout_s: float = 120) -> dict:
 
 
 @mcp.tool()
+async def run_cells(cell_ids: list[str], timeout_s: float = 600) -> dict:
+    """Execute several cells with one call, returning per-cell outputs in the requested order.
+
+    Executions queue in the kernel like the notebook's Run All, so an error in one cell aborts the
+    ones after it. On timeout, finished cells keep their outputs and unfinished ones are marked
+    "timed out" (they keep running in the kernel). Long text is truncated. Default timeout 600.
+    """
+    result = await _relay.command("run_cells", {"cell_ids": cell_ids, "timeout_ms": int(timeout_s * 1000)})
+    for cell_result in result.get("results", []):
+        for output in cell_result.get("outputs", []):
+            _clean_output(output)
+    return result
+
+
+@mcp.tool()
 async def inspect_kernel(code: str, timeout_s: float = 30, full: bool = False) -> dict:
     """Evaluate code in the notebook's live kernel without touching cells, outputs, or history.
 
