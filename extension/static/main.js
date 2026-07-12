@@ -11,6 +11,7 @@ define([
     var SOURCE_DEBOUNCE_MS = 400;
     var EXECUTE_TIMEOUT_MS = 120000;
     var INSPECT_TIMEOUT_MS = 30000;
+    var UNDO_STACK_MAXLEN = 50;
     var RECONNECT_MIN_MS = 2000;
     var RECONNECT_MAX_MS = 30000;
 
@@ -32,6 +33,7 @@ define([
     var focusedCellId = null;       // cell the human is editing; drives the set_source skip
     var dirtyCells = {};            // cell_id -> true, awaiting a debounced source_changed
     var lastAgentWrite = {};        // cell_id -> source the mcp side last wrote, to drop its echo
+    var undoStack = [];             // inverses of agent mutations, newest last; see recordUndo
     var debounceTimer = null;
 
 
@@ -88,6 +90,68 @@ define([
     function writeAgentSource(cell, source) {
         cell.set_text(source);
         lastAgentWrite[cell.id] = source;
+    }
+
+    function recordUndo(entry) {
+        undoStack.push(entry);
+        if (undoStack.length > UNDO_STACK_MAXLEN) {
+            undoStack.shift();
+        }
+    }
+
+    // Undo one recorded agent mutation, newest first. Each entry knows what the notebook should
+    // still look like; when the human has touched the same cell since, the entry is skipped so an
+    // undo can never destroy human work.
+    function undoLast() {
+        var entry = undoStack.pop();
+        if (!entry) {
+            return { status: "nothing to undo" };
+        }
+        var nb = Jupyter.notebook;
+        var described = entry.op + " on " + (entry.cell_id || "cell");
+        if (entry.op === "set_source") {
+            var edited = cellById(entry.cell_id);
+            if (!edited) {
+                return { status: "skipped", reason: "cell no longer exists", undid: described };
+            }
+            if (edited.get_text() !== entry.after) {
+                return { status: "skipped", reason: "cell changed since", undid: described };
+            }
+            writeAgentSource(edited, entry.before);
+            flashCell(edited);
+            return { status: "undone", undid: described };
+        }
+        if (entry.op === "insert_cell") {
+            var inserted = cellById(entry.cell_id);
+            if (!inserted) {
+                return { status: "skipped", reason: "cell no longer exists", undid: described };
+            }
+            if (inserted.get_text() !== entry.after) {
+                return { status: "skipped", reason: "cell changed since", undid: described };
+            }
+            nb.delete_cell(nb.find_cell_index(inserted));
+            return { status: "undone", undid: described };
+        }
+        if (entry.op === "delete_cell") {
+            var restored = nb.insert_cell_at_index(entry.cell.cell_type, entry.index);
+            restored.fromJSON(entry.cell);
+            lastAgentWrite[restored.id] = restored.get_text();
+            flashCell(restored);
+            return { status: "undone", undid: described };
+        }
+        if (entry.op === "move_cell") {
+            var moved = cellById(entry.cell_id);
+            if (!moved) {
+                return { status: "skipped", reason: "cell no longer exists", undid: described };
+            }
+            if (nb.find_cell_index(moved) !== entry.to) {
+                return { status: "skipped", reason: "cell moved since", undid: described };
+            }
+            moveCell(entry.cell_id, entry.from);
+            flashCell(moved);
+            return { status: "undone", undid: described };
+        }
+        return { status: "skipped", reason: "unknown entry", undid: described };
     }
 
     // Fading highlight on any cell the assistant touches, so its edits are visible as they land.
@@ -186,6 +250,7 @@ define([
             if (!created) { throw new Error("could not insert a " + args.cell_type + " cell"); }
             writeAgentSource(created, args.source || "");
             flashCell(created);
+            recordUndo({ op: "insert_cell", cell_id: created.id, after: args.source || "" });
             return { cell_id: created.id, index: nb.find_cell_index(created) };
         }
         case "set_source": {
@@ -195,6 +260,7 @@ define([
             var edited = requireCell(args.cell_id);
             // set_text drops a rendered markdown cell back to its raw source; restore the view it was in.
             var wasRendered = edited.rendered;
+            recordUndo({ op: "set_source", cell_id: args.cell_id, before: edited.get_text(), after: args.source || "" });
             writeAgentSource(edited, args.source || "");
             if (wasRendered) { edited.render(); }
             flashCell(edited);
@@ -202,11 +268,16 @@ define([
         }
         case "delete_cell": {
             var deleteIndex = indexById(args.cell_id);
+            recordUndo({ op: "delete_cell", index: deleteIndex, cell: requireCell(args.cell_id).toJSON() });
             nb.delete_cell(deleteIndex);
             return { cell_id: args.cell_id };
         }
-        case "move_cell":
-            return moveCell(args.cell_id, args.index);
+        case "move_cell": {
+            var beforeIndex = indexById(args.cell_id);
+            var movedResult = moveCell(args.cell_id, args.index);
+            recordUndo({ op: "move_cell", cell_id: args.cell_id, from: beforeIndex, to: movedResult.index });
+            return movedResult;
+        }
         case "execute_cell":
             executeCell(args.cell_id, id, args.timeout_ms);
             return DEFERRED;
@@ -216,6 +287,15 @@ define([
         case "interrupt_kernel":
             requireLiveKernel().interrupt();
             return { status: "interrupt requested" };
+        case "undo_last":
+            return undoLast();
+        case "undo_all": {
+            var results = [];
+            while (undoStack.length) {
+                results.push(undoLast());
+            }
+            return { results: results };
+        }
         case "kernel_info": {
             var kernel = nb.kernel;
             return {

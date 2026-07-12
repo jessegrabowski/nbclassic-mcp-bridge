@@ -359,6 +359,27 @@ async def move_cell(cell_id: str, index: int) -> dict:
 
 
 @mcp.tool()
+async def undo_last_change() -> dict:
+    """Undo your most recent notebook mutation (set/insert/delete/move; executions are not undoable).
+
+    An entry is skipped rather than applied when the human has touched that cell since, so undo can
+    never destroy human work; skipped or not, the entry is consumed. Returns what was undone or why
+    it was skipped.
+    """
+    return await _relay.command("undo_last", {})
+
+
+@mcp.tool()
+async def undo_all_changes() -> dict:
+    """Undo every recorded mutation of yours, newest first, with per-entry results.
+
+    Entries the human has since touched are skipped, not applied (and consumed either way);
+    executions are not undoable.
+    """
+    return await _relay.command("undo_all", {})
+
+
+@mcp.tool()
 async def poll_events(cursor: int = 0) -> dict:
     """Return the human's notebook edits since ``cursor``.
 
