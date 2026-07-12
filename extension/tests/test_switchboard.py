@@ -364,3 +364,42 @@ def test_buffer_and_numbering_survive_extension_churn():
         ),
     )
     assert [frame["seq"] for frame in late.sent if frame["kind"] == "event"] == [1, 2]
+
+
+def _hello_with_capabilities(sb, peer, capabilities):
+    sb.route(
+        peer,
+        json.dumps(
+            {
+                "kind": "hello",
+                "protocol": PROTOCOL_VERSION,
+                "role": "extension",
+                "notebook": "nb.ipynb",
+                "capabilities": capabilities,
+            }
+        ),
+    )
+
+
+def test_extension_capabilities_reach_the_mcp_peer_in_both_join_orders():
+    sb = Switchboard()
+    ext = FakePeer()
+    _hello_with_capabilities(sb, ext, ["snapshot", "inspect"])
+    mcp = join(sb, "mcp")
+    joined = next(frame for frame in mcp.sent if frame["kind"] == "status")
+    assert joined["capabilities"] == ["snapshot", "inspect"]
+
+    sb = Switchboard()
+    mcp = join(sb, "mcp")
+    ext = FakePeer()
+    _hello_with_capabilities(sb, ext, ["snapshot"])
+    joined = [frame for frame in mcp.sent if frame["kind"] == "status"][-1]
+    assert joined == {"kind": "status", "peer": "extension", "state": "joined", "capabilities": ["snapshot"]}
+
+
+def test_legacy_extension_hello_yields_a_capability_free_status():
+    sb = Switchboard()
+    join(sb, "extension")
+    mcp = join(sb, "mcp")
+    joined = next(frame for frame in mcp.sent if frame["kind"] == "status")
+    assert joined == {"kind": "status", "peer": "extension", "state": "joined"}

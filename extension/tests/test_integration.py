@@ -158,6 +158,32 @@ def test_events_missed_while_detached_replay_on_rejoin(relay_url):
     asyncio.run(scenario())
 
 
+def test_capabilities_flow_through_real_sockets(relay_url):
+    async def scenario():
+        url = f"{relay_url}?token={TOKEN}"
+        ext = await websocket_connect(url)
+        ext.write_message(
+            json.dumps(
+                {
+                    "kind": "hello",
+                    "protocol": PROTOCOL_VERSION,
+                    "role": "extension",
+                    "notebook": "caps.ipynb",
+                    "capabilities": ["snapshot", "inspect"],
+                }
+            )
+        )
+        mcp = await websocket_connect(url)
+        mcp.write_message(hello("mcp", "caps.ipynb"))
+        joined = await _recv(mcp)
+        assert joined["state"] == "joined"
+        assert joined["capabilities"] == ["snapshot", "inspect"]
+        ext.close()
+        mcp.close()
+
+    asyncio.run(scenario())
+
+
 def test_unauthenticated_connection_rejected(relay_url):
     async def scenario():
         with pytest.raises(HTTPClientError) as exc_info:
