@@ -231,11 +231,11 @@ define([
         sendFrame(reply);
     }
 
-    function runOp(op, args, id) {
-        var nb = Jupyter.notebook;
-        switch (op) {
-        case "snapshot": {
-            var cells = nb.get_cells().map(cellToProto);
+    // The op table doubles as the capability list the hello advertises: a handler's presence here
+    // is what makes the op callable, so the two can never drift apart.
+    var OPS = {
+        snapshot: function (args) {
+            var cells = Jupyter.notebook.get_cells().map(cellToProto);
             if (args.outputs === "summary") {
                 cells.forEach(function (cell) {
                     cell.output_summary = cell.outputs.map(summarizeOutput);
@@ -243,18 +243,20 @@ define([
                 });
             }
             return cells;
-        }
-        case "read_cell":
+        },
+        read_cell: function (args) {
             return cellToProto(requireCell(args.cell_id));
-        case "insert_cell": {
+        },
+        insert_cell: function (args) {
+            var nb = Jupyter.notebook;
             var created = nb.insert_cell_at_index(args.cell_type, args.index);
             if (!created) { throw new Error("could not insert a " + args.cell_type + " cell"); }
             writeAgentSource(created, args.source || "");
             flashCell(created);
             recordUndo({ op: "insert_cell", cell_id: created.id, after: args.source || "" });
             return { cell_id: created.id, index: nb.find_cell_index(created) };
-        }
-        case "set_source": {
+        },
+        set_source: function (args) {
             if (args.cell_id === focusedCellId) {
                 return { cell_id: args.cell_id, status: "skipped", reason: "focused" };
             }
@@ -266,38 +268,51 @@ define([
             if (wasRendered) { edited.render(); }
             flashCell(edited);
             return { cell_id: args.cell_id, status: "written" };
-        }
-        case "delete_cell": {
+        },
+        delete_cell: function (args) {
             var deleteIndex = indexById(args.cell_id);
             recordUndo({ op: "delete_cell", index: deleteIndex, cell: requireCell(args.cell_id).toJSON() });
-            nb.delete_cell(deleteIndex);
+            Jupyter.notebook.delete_cell(deleteIndex);
             return { cell_id: args.cell_id };
-        }
-        case "move_cell": {
+        },
+        move_cell: function (args) {
             var beforeIndex = indexById(args.cell_id);
             var movedResult = moveCell(args.cell_id, args.index);
             recordUndo({ op: "move_cell", cell_id: args.cell_id, from: beforeIndex, to: movedResult.index });
             return movedResult;
-        }
-        case "execute_cell":
+        },
+        execute_cell: function (args, id) {
             executeCell(args.cell_id, id, args.timeout_ms);
             return DEFERRED;
-        case "inspect":
+        },
+        inspect: function (args, id) {
             inspectKernel(args.code || "", id, args.timeout_ms);
             return DEFERRED;
-        case "interrupt_kernel":
+        },
+        interrupt_kernel: function () {
             requireLiveKernel().interrupt();
             return { status: "interrupt requested" };
-        case "undo_last":
+        },
+        kernel_info: function () {
+            var kernel = Jupyter.notebook.kernel;
+            return {
+                state: kernelState,
+                connected: !!(kernel && (!kernel.is_connected || kernel.is_connected())),
+                kernel_name: kernel ? kernel.name : null,
+            };
+        },
+        undo_last: function () {
             return undoLast();
-        case "undo_all": {
+        },
+        undo_all: function () {
             var results = [];
             while (undoStack.length) {
                 results.push(undoLast());
             }
             return { results: results };
-        }
-        case "reload_notebook":
+        },
+        reload_notebook: function () {
+            var nb = Jupyter.notebook;
             undoStack = [];
             lastAgentWrite = {};
             dirtyCells = {};
@@ -306,17 +321,13 @@ define([
             events.one("notebook_loaded.Notebook", function () { reloading = false; });
             nb.load_notebook(nb.notebook_path);
             return { status: "reloading" };
-        case "kernel_info": {
-            var kernel = nb.kernel;
-            return {
-                state: kernelState,
-                connected: !!(kernel && (!kernel.is_connected || kernel.is_connected())),
-                kernel_name: kernel ? kernel.name : null,
-            };
-        }
-        default:
-            throw new Error("unknown op: " + op);
-        }
+        },
+    };
+
+    function runOp(op, args, id) {
+        var handler = OPS[op];
+        if (!handler) { throw new Error("unknown op: " + op); }
+        return handler(args, id);
     }
 
     // No index-based move exists in nbclassic; delete then reinsert. fromJSON restores id, source and
