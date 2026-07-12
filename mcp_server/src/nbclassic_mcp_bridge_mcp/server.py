@@ -364,10 +364,12 @@ async def poll_events(cursor: int = 0) -> dict:
 
     Pass 0 on the first call, then feed the returned ``cursor`` back to get only newer events. Each
     event is ``{name, data}`` -- one of cell_created, cell_deleted, cell_moved, cell_executed,
-    source_changed, focus_changed, bridge_paused, bridge_resumed, kernel_status -- and reflects
-    the human's actions (never an echo of your own commands) plus kernel failures and recoveries. While the human has the bridge paused,
-    every command fails with "bridge paused by the user" until a bridge_resumed event arrives.
-    Image payloads are omitted from cell_executed outputs; use ``read_cell_image`` to view them.
+    source_changed, focus_changed, bridge_paused, bridge_resumed, kernel_status -- and reflects the
+    human's actions (never an echo of your own commands) plus kernel failures and recoveries.
+    Events that fire while this server is detached are replayed on reconnect from a bounded relay
+    buffer, so brief gaps do not lose edits. While the human has the bridge paused, every command
+    fails with "bridge paused by the user" until a bridge_resumed event arrives. Image payloads
+    are omitted from cell_executed outputs; use ``read_cell_image`` to view them.
     """
     events, new_cursor = _relay.events_since(cursor)
     return _clean_event_outputs({"events": events, "cursor": new_cursor})

@@ -114,6 +114,50 @@ def test_rooms_endpoint_requires_auth(relay_url):
     asyncio.run(scenario())
 
 
+def test_events_missed_while_detached_replay_on_rejoin(relay_url):
+    async def scenario():
+        url = f"{relay_url}?token={TOKEN}"
+        ext = await websocket_connect(url)
+        ext.write_message(hello("extension", "replay.ipynb"))
+
+        # Nobody is listening while these happen.
+        for cell_id in ("a", "b"):
+            ext.write_message(json.dumps({"kind": "event", "name": "cell_created", "data": {"cell_id": cell_id}}))
+
+        first = await websocket_connect(url)
+        first.write_message(hello("mcp", "replay.ipynb"))
+        assert (await _recv(first))["state"] == "joined"
+        replayed = [await _recv(first), await _recv(first)]
+        assert [event["data"]["cell_id"] for event in replayed] == ["a", "b"]
+        log_id = replayed[-1]["log_id"]
+        first.close()
+
+        ext.write_message(json.dumps({"kind": "event", "name": "cell_deleted", "data": {"cell_id": "a"}}))
+
+        returning = await websocket_connect(url)
+        returning.write_message(
+            json.dumps(
+                {
+                    "kind": "hello",
+                    "protocol": PROTOCOL_VERSION,
+                    "role": "mcp",
+                    "notebook": "replay.ipynb",
+                    "last_event_seq": replayed[-1]["seq"],
+                    "log_id": log_id,
+                }
+            )
+        )
+        assert (await _recv(returning))["state"] == "joined"
+        missed = await _recv(returning)
+        assert missed["name"] == "cell_deleted"
+        assert missed["seq"] == 3
+
+        ext.close()
+        returning.close()
+
+    asyncio.run(scenario())
+
+
 def test_unauthenticated_connection_rejected(relay_url):
     async def scenario():
         with pytest.raises(HTTPClientError) as exc_info:

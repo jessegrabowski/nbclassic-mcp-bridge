@@ -100,9 +100,8 @@ def test_route_rejects_bad_input(frame, expected_code):
     [
         ("mcp", {"kind": "cmd", "id": 3, "op": "snapshot", "args": {}}),
         ("extension", {"kind": "reply", "id": 3, "ok": True, "result": []}),
-        ("extension", {"kind": "event", "name": "cell_executed", "data": {"cell_id": "c1"}}),
     ],
-    ids=["cmd", "reply", "event"],
+    ids=["cmd", "reply"],
 )
 def test_frame_is_forwarded_to_the_other_peer_only(sender_role, frame):
     sb = Switchboard()
@@ -112,6 +111,17 @@ def test_frame_is_forwarded_to_the_other_peer_only(sender_role, frame):
     sb.route(sender, json.dumps(frame))
     assert other.sent[-1] == frame
     assert frame not in sender.sent
+
+
+def test_events_are_stamped_and_forwarded():
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    mcp = join(sb, "mcp")
+    sb.route(ext, json.dumps({"kind": "event", "name": "cell_deleted", "data": {"cell_id": "c1"}}))
+    sb.route(ext, json.dumps({"kind": "event", "name": "cell_created", "data": {"cell_id": "c2"}}))
+    stamped = [frame for frame in mcp.sent if frame["kind"] == "event"]
+    assert [frame["seq"] for frame in stamped] == [1, 2]
+    assert all(frame["log_id"] == sb.log_id for frame in stamped)
 
 
 @pytest.mark.parametrize(
@@ -212,3 +222,145 @@ def test_presence_forgets_departed_rooms():
     peer = join(sb, "mcp")
     sb.leave(peer)
     assert sb.presence() == {}
+
+
+def _emit(sb, ext, name, cell_id):
+    sb.route(ext, json.dumps({"kind": "event", "name": name, "data": {"cell_id": cell_id}}))
+
+
+def test_events_buffered_while_mcp_is_absent_replay_on_join():
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    _emit(sb, ext, "cell_created", "a")
+    _emit(sb, ext, "source_changed", "a")
+
+    mcp = join(sb, "mcp")
+    replayed = [frame for frame in mcp.sent if frame["kind"] == "event"]
+    assert [frame["name"] for frame in replayed] == ["cell_created", "source_changed"]
+    # the join notification still precedes the replay
+    assert mcp.sent[0] == {"kind": "status", "peer": "extension", "state": "joined"}
+
+
+def test_replay_skips_events_the_peer_already_saw():
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    _emit(sb, ext, "cell_created", "a")
+    _emit(sb, ext, "cell_deleted", "a")
+
+    returning = FakePeer()
+    sb.route(
+        returning,
+        json.dumps(
+            {
+                "kind": "hello",
+                "protocol": PROTOCOL_VERSION,
+                "role": "mcp",
+                "notebook": "nb.ipynb",
+                "last_event_seq": 1,
+                "log_id": sb.log_id,
+            }
+        ),
+    )
+    replayed = [frame for frame in returning.sent if frame["kind"] == "event"]
+    assert [frame["seq"] for frame in replayed] == [2]
+
+
+def test_replay_ignores_a_position_from_another_log():
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    _emit(sb, ext, "cell_created", "a")
+
+    returning = FakePeer()
+    sb.route(
+        returning,
+        json.dumps(
+            {
+                "kind": "hello",
+                "protocol": PROTOCOL_VERSION,
+                "role": "mcp",
+                "notebook": "nb.ipynb",
+                "last_event_seq": 99,
+                "log_id": "some-older-relay",
+            }
+        ),
+    )
+    replayed = [frame for frame in returning.sent if frame["kind"] == "event"]
+    assert [frame["seq"] for frame in replayed] == [1]
+
+
+def test_event_buffer_is_bounded(monkeypatch):
+    import nbclassic_mcp_bridge.switchboard as switchboard_module
+
+    monkeypatch.setattr(switchboard_module, "EVENT_BUFFER_MAXLEN", 3)
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    for n in range(5):
+        _emit(sb, ext, "cell_created", f"c{n}")
+
+    mcp = join(sb, "mcp")
+    replayed = [frame for frame in mcp.sent if frame["kind"] == "event"]
+    assert [frame["seq"] for frame in replayed] == [3, 4, 5]
+
+
+def test_buffer_dies_with_the_room():
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    _emit(sb, ext, "cell_created", "a")
+    sb.leave(ext)
+
+    mcp = join(sb, "mcp")
+    assert [frame for frame in mcp.sent if frame["kind"] == "event"] == []
+
+
+def test_replay_coerces_a_malformed_position_to_full_replay():
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    _emit(sb, ext, "cell_created", "a")
+
+    returning = FakePeer()
+    sb.route(
+        returning,
+        json.dumps(
+            {
+                "kind": "hello",
+                "protocol": PROTOCOL_VERSION,
+                "role": "mcp",
+                "notebook": "nb.ipynb",
+                "last_event_seq": "not-a-number",
+                "log_id": sb.log_id,
+            }
+        ),
+    )
+    replayed = [frame for frame in returning.sent if frame["kind"] == "event"]
+    assert [frame["seq"] for frame in replayed] == [1]
+
+
+def test_buffer_and_numbering_survive_extension_churn():
+    # The room outlives a reconnecting browser tab as long as the mcp peer holds it, so the
+    # buffer keeps accumulating and the numbering never restarts.
+    sb = Switchboard()
+    ext = join(sb, "extension")
+    mcp = join(sb, "mcp")
+    _emit(sb, ext, "cell_created", "a")
+    sb.leave(ext)
+
+    ext = join(sb, "extension")
+    _emit(sb, ext, "cell_deleted", "a")
+    seqs = [frame["seq"] for frame in mcp.sent if frame["kind"] == "event"]
+    assert seqs == [1, 2]
+
+    late = FakePeer()
+    sb.route(
+        late,
+        json.dumps(
+            {
+                "kind": "hello",
+                "protocol": PROTOCOL_VERSION,
+                "role": "mcp",
+                "notebook": "nb.ipynb",
+                "last_event_seq": 0,
+                "log_id": None,
+            }
+        ),
+    )
+    assert [frame["seq"] for frame in late.sent if frame["kind"] == "event"] == [1, 2]

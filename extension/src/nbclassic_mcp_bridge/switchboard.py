@@ -1,8 +1,13 @@
 import json
+from collections import deque
+from uuid import uuid4
 
 
 PROTOCOL_VERSION = 0
 ROLES = ("extension", "mcp")
+
+# Cap on buffered events per room; the oldest fall off and can no longer be replayed.
+EVENT_BUFFER_MAXLEN = 1000
 
 
 def _other(role):
@@ -21,6 +26,9 @@ class Switchboard:
     methods. ``BridgeHandler`` is the production peer; tests use a list-backed fake. Keeping the
     routing here, free of any WebSocket type, is what makes it unit-testable without mocking.
 
+    Events from the extension are stamped with a per-room sequence number, retained in a bounded
+    buffer, and replayed to an mcp peer that joins (or rejoins) past its declared position.
+
     All methods are synchronous: ``send`` is fire-and-forget and ``close`` only schedules a close,
     so nothing here needs to await.
     """
@@ -29,6 +37,12 @@ class Switchboard:
         # notebook path -> {role -> peer}. A room pairs the browser
         # ("extension") with the assistant ("mcp").
         self.rooms: dict[str, dict[str, object]] = {}
+        # Identifies this switchboard's event numbering: a client's last_event_seq is only
+        # meaningful against the log_id it was learned from, so a relay restart (fresh, empty
+        # buffers) cannot silently swallow newly numbered events.
+        self.log_id = uuid4().hex[:8]
+        self._event_buffers: dict[str, deque] = {}
+        self._event_seqs: dict[str, int] = {}
 
     def route(self, peer, raw):
         """Handle one inbound frame from ``peer``."""
@@ -48,6 +62,9 @@ class Switchboard:
         if peer.role is None:
             peer.close(1002, "send a hello frame before anything else")
             return
+
+        if kind == "event" and peer.role == "extension":
+            raw = self._stamp_and_buffer(peer.notebook, msg)
 
         target = self._peer(peer)
         if target is not None:
@@ -78,6 +95,8 @@ class Switchboard:
             _send(target, {"kind": "status", "peer": peer.role, "state": "left"})
         if not room:
             del self.rooms[peer.notebook]
+            self._event_buffers.pop(peer.notebook, None)
+            self._event_seqs.pop(peer.notebook, None)
 
     def _hello(self, peer, msg):
         if msg.get("protocol") != PROTOCOL_VERSION:
@@ -108,6 +127,37 @@ class Switchboard:
             # Tell each side that the other is present.
             _send(target, {"kind": "status", "peer": role, "state": "joined"})
             _send(peer, {"kind": "status", "peer": _other(role), "state": "joined"})
+
+        if role == "mcp":
+            self._replay_events(peer, msg)
+
+    def _stamp_and_buffer(self, notebook, msg):
+        """Number the event, retain it for replay, and return the frame to forward."""
+        seq = self._event_seqs.get(notebook, 0) + 1
+        self._event_seqs[notebook] = seq
+        msg["seq"] = seq
+        msg["log_id"] = self.log_id
+        buffer = self._event_buffers.get(notebook)
+        if buffer is None:
+            buffer = self._event_buffers[notebook] = deque(maxlen=EVENT_BUFFER_MAXLEN)
+        buffer.append(msg)
+        return json.dumps(msg)
+
+    def _replay_events(self, peer, hello):
+        """Resend buffered events the joining mcp peer has not seen.
+
+        The peer's ``last_event_seq`` only counts if it was learned from this switchboard's
+        ``log_id``; otherwise everything buffered for the room is replayed.
+        """
+        buffered = self._event_buffers.get(peer.notebook)
+        if not buffered:
+            return
+        last_seen = hello.get("last_event_seq", 0) if hello.get("log_id") == self.log_id else 0
+        if not isinstance(last_seen, int):
+            last_seen = 0
+        for event in buffered:
+            if event["seq"] > last_seen:
+                _send(peer, event)
 
     def presence(self):
         """Map each notebook path with a live room to the sorted roles present in it."""
