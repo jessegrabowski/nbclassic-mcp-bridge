@@ -361,6 +361,41 @@ def test_inspect_evaluates_without_touching_the_notebook(nbclassic_port):
     asyncio.run(scenario())
 
 
+def test_run_cells_batches_with_run_all_error_semantics(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            mcp = await McpPeer.connect(nbclassic_port)
+            batch = []
+            try:
+                await page.goto(f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}")
+                await mcp.recv_until(_extension_joined)
+                await _wait_for_live_kernel(page, nbclassic_port)
+
+                for source in ("first = 41", "raise ValueError('boom')", "print(first)"):
+                    created = await mcp.command(
+                        "insert_cell", {"index": len(batch), "cell_type": "code", "source": source}
+                    )
+                    batch.append(created["cell_id"])
+
+                reply = await mcp.command("run_cells", {"cell_ids": batch}, timeout=60)
+                results = reply["results"]
+                assert [r["cell_id"] for r in results] == batch
+
+                assert results[0]["outputs"] == []
+                assert any(o.get("ename") == "ValueError" for o in results[1]["outputs"])
+                # the kernel aborts everything queued behind the error, exactly like Run All
+                assert results[2]["outputs"] == []
+            finally:
+                for cell_id in batch:
+                    await mcp.command("delete_cell", {"cell_id": cell_id})
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_interrupt_kernel_stops_a_running_cell(nbclassic_port):
     async def scenario():
         async with async_playwright() as pw:

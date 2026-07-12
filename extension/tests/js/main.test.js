@@ -306,3 +306,89 @@ test("undo guards refuse to delete or move cells the human drifted", () => {
     assert.equal(lastReply(socket, 4).result.status, "skipped");
     assert.equal(bridge.notebook.find_cell_index(moved), 0, "the human's placement must survive");
 });
+
+
+test("run_cells returns per-cell outputs in request order with one reply", () => {
+    const bridge = loadBridge([["c1", "a = 1"], ["c2", "print(a)"], ["md", "# notes", { cell_type: "markdown" }]]);
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "run_cells", args: { cell_ids: ["c2", "md", "c1"] } });
+    assert.equal(socket.sent.filter((f) => f.kind === "reply").length, 0, "must wait for the kernel");
+
+    bridge.cells[0].outputs = [];
+    bridge.cells[1].outputs = [{ output_type: "stream", name: "stdout", text: "1\n" }];
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[0] });
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[1] });
+
+    const reply = lastReply(socket, 1);
+    assert.deepEqual(reply.result.results.map((r) => r.cell_id), ["c2", "md", "c1"]);
+    assert.equal(reply.result.results[0].outputs[0].text, "1\n");
+    assert.deepEqual(reply.result.results[1].outputs, []);
+    assert.deepEqual(eventsSent(socket, "cell_executed"), [], "batch executions must not echo");
+});
+
+test("run_cells validates every id before executing anything", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "run_cells", args: { cell_ids: ["c1", "ghost"] } });
+    assert.match(lastReply(socket, 1).error, /no cell with id ghost/);
+    assert.ok(!bridge.cells[0].executed, "nothing may run when validation fails");
+});
+
+test("run_cells times out with partial results and frees the pending marks", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "run_cells", args: { cell_ids: ["c1", "c2"], timeout_ms: 5000 } });
+    bridge.cells[0].outputs = [{ output_type: "stream", name: "stdout", text: "done\n" }];
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[0] });
+
+    t.mock.timers.tick(5000);
+    const reply = lastReply(socket, 1);
+    assert.equal(reply.result.results[0].outputs[0].text, "done\n");
+    assert.equal(reply.result.results[1].status, "timed out");
+
+    // A late finish surfaces as a human-visible event, exactly like a timed-out execute_cell.
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[1] });
+    assert.equal(eventsSent(socket, "cell_executed").length, 1);
+});
+
+test("run_cells rejects a batch touching a cell that is already executing", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "execute_cell", args: { cell_id: "c1" } });
+    socket.receive({ kind: "cmd", id: 2, op: "run_cells", args: { cell_ids: ["c1", "c2"] } });
+    assert.match(lastReply(socket, 2).error, /already executing/);
+});
+
+
+test("run_cells rejects duplicate ids instead of double-executing", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+    let executions = 0;
+    bridge.cells[0].execute = () => { executions += 1; };
+
+    socket.receive({ kind: "cmd", id: 1, op: "run_cells", args: { cell_ids: ["c1", "c1"] } });
+    assert.match(lastReply(socket, 1).error, /duplicate cell ids/);
+    assert.equal(executions, 0);
+});
+
+test("a mid-dispatch execute failure yields exactly one reply and leaks nothing", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+    bridge.cells[1].execute = () => { throw new Error("kernel died mid-dispatch"); };
+
+    socket.receive({ kind: "cmd", id: 1, op: "run_cells", args: { cell_ids: ["c1", "c2"] } });
+    t.mock.timers.tick(700000);
+    const replies = socket.sent.filter((f) => f.kind === "reply" && f.id === 1);
+    assert.equal(replies.length, 1);
+    assert.equal(replies[0].ok, false);
+
+    // the freed mark means a later finish surfaces as a human event, not as leaked batch state
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[0] });
+    assert.equal(eventsSent(socket, "cell_executed").length, 1);
+});

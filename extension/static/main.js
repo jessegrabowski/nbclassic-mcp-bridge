@@ -285,6 +285,10 @@ define([
             executeCell(args.cell_id, id, args.timeout_ms);
             return DEFERRED;
         },
+        run_cells: function (args, id) {
+            runCells(args.cell_ids || [], id, args.timeout_ms);
+            return DEFERRED;
+        },
         inspect: function (args, id) {
             inspectKernel(args.code || "", id, args.timeout_ms);
             return DEFERRED;
@@ -387,6 +391,81 @@ define([
         }
         events.on("finished_execute.CodeCell", onFinished);
         cell.execute();
+    }
+
+    var RUN_CELLS_TIMEOUT_MS = 600000;
+
+    // Execute several cells with one reply: every execute is sent immediately (the kernel runs
+    // them FIFO, exactly like the notebook's own Run All, and an error aborts the rest of the
+    // queue), and the reply carries per-cell outputs in the requested order once all finish. On
+    // timeout the finished cells keep their outputs and the rest are marked timed out.
+    function runCells(cellIds, id, timeoutMs) {
+        var cells = cellIds.map(requireCell);
+        if (new Set(cellIds).size !== cellIds.length) {
+            throw new Error("duplicate cell ids in batch");
+        }
+        if (cells.some(function (cell) { return cell.cell_type === "code"; })) {
+            requireLiveKernel();
+        }
+        cells.forEach(function (cell) {
+            if (pendingExecutes[cell.id]) {
+                throw new Error("cell " + cell.id + " is already executing");
+            }
+        });
+
+        var outputsById = {};
+        var remaining = {};
+        var done = false;
+        function finish() {
+            done = true;
+            clearTimeout(timer);
+            events.off("finished_execute.CodeCell", onFinished);
+            sendFrame({ kind: "reply", id: id, ok: true, result: {
+                results: cellIds.map(function (cellId) {
+                    if (remaining[cellId]) {
+                        return { cell_id: cellId, status: "timed out", outputs: [] };
+                    }
+                    return { cell_id: cellId, outputs: outputsById[cellId] };
+                }),
+            } });
+        }
+        var timer = setTimeout(function () {
+            if (done) { return; }
+            Object.keys(remaining).forEach(function (cellId) {
+                // Late finishes surface as cell_executed events, like a timed-out execute_cell.
+                delete pendingExecutes[cellId];
+            });
+            finish();
+        }, timeoutMs > 0 ? timeoutMs : RUN_CELLS_TIMEOUT_MS);
+        function onFinished(evt, data) {
+            if (done || !remaining[data.cell.id]) { return; }
+            delete remaining[data.cell.id];
+            outputsById[data.cell.id] = cellOutputs(data.cell);
+            if (!Object.keys(remaining).length) { finish(); }
+        }
+
+        events.on("finished_execute.CodeCell", onFinished);
+        try {
+            cells.forEach(function (cell) {
+                if (cell.cell_type === "code") {
+                    pendingExecutes[cell.id] = true;
+                    remaining[cell.id] = true;
+                } else {
+                    outputsById[cell.id] = [];
+                }
+                flashCell(cell);
+                cell.execute();
+            });
+        } catch (e) {
+            // applyCommand replies with this error; leaving the timer or handler armed would send
+            // a second reply for the same id later.
+            done = true;
+            clearTimeout(timer);
+            events.off("finished_execute.CodeCell", onFinished);
+            Object.keys(remaining).forEach(function (cellId) { delete pendingExecutes[cellId]; });
+            throw e;
+        }
+        if (!Object.keys(remaining).length) { finish(); }
     }
 
     // Evaluate code in the live kernel without touching cells or history: store_history keeps
