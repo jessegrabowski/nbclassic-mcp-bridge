@@ -377,15 +377,26 @@ def test_interrupt_kernel_stops_a_running_cell(nbclassic_port):
                     "insert_cell", {"index": 0, "cell_type": "code", "source": "import time; time.sleep(120)"}
                 )
                 running = mcp.send_cmd("execute_cell", {"cell_id": slow["cell_id"]})
-                await asyncio.sleep(1.0)  # let the kernel actually start the sleep
+                # Interrupting before the kernel dequeues the execute would hit nothing and leave
+                # the sleep running to poison later tests; wait until the kernel is demonstrably busy.
+                deadline = asyncio.get_event_loop().time() + 30
+                while (await mcp.command("kernel_info", {}))["state"] != "busy":
+                    assert asyncio.get_event_loop().time() < deadline, "the slow cell never started"
+                    await asyncio.sleep(0.2)
 
-                assert (await mcp.command("interrupt_kernel", {}))["status"] == "interrupt requested"
-                reply = await mcp.recv_until(lambda f: f.get("kind") == "reply" and f.get("id") == running, timeout=30)
-                assert reply.get("ok"), reply.get("error")
-                rendered = json.dumps(reply["result"]["outputs"])
-                assert "KeyboardInterrupt" in rendered
-
-                await mcp.command("delete_cell", {"cell_id": slow["cell_id"]})
+                try:
+                    assert (await mcp.command("interrupt_kernel", {}))["status"] == "interrupt requested"
+                    reply = await mcp.recv_until(
+                        lambda f: f.get("kind") == "reply" and f.get("id") == running, timeout=30
+                    )
+                    assert reply.get("ok"), reply.get("error")
+                    rendered = json.dumps(reply["result"]["outputs"])
+                    assert "KeyboardInterrupt" in rendered
+                finally:
+                    # The kernel is shared with other tests: whatever happened above, do not leave a
+                    # runaway sleep behind. Interrupting an idle kernel is a no-op.
+                    await mcp.command("interrupt_kernel", {})
+                    await mcp.command("delete_cell", {"cell_id": slow["cell_id"]})
             finally:
                 mcp.close()
                 await browser.close()
