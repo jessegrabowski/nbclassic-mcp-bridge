@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 
+import pytest
+
 from nbclassic_mcp_bridge_mcp.server import (
     _JUPYTER_URL,
     _cell_output_view,
@@ -228,3 +230,18 @@ def test_use_notebook_attaches_verbatim_when_nothing_matches(monkeypatch):
     message, stub = _run_use_notebook(monkeypatch, [_record("nb/a.ipynb")], path="new.ipynb", tab_connected=False)
     assert stub.connected_to == "new.ipynb"
     assert "no browser tab is connected" in message and "nb/a.ipynb" in message
+
+
+def test_restore_without_a_checkpoint_gives_an_actionable_error(monkeypatch):
+    import nbclassic_mcp_bridge_mcp.server as server
+
+    stub = StubRelay()
+    stub.notebook = "nb/a.ipynb"
+    monkeypatch.setattr(server, "_relay", stub)
+
+    async def no_checkpoints(url, token, path):
+        return []
+
+    monkeypatch.setattr(server.discovery, "list_checkpoints", no_checkpoints)
+    with pytest.raises(RuntimeError, match="checkpoint_notebook first"):
+        asyncio.run(server.restore_notebook_checkpoint())

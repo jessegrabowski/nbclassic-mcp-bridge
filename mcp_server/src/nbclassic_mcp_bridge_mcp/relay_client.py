@@ -57,6 +57,11 @@ class RelayClient:
         """The token for the currently targeted Jupyter server."""
         return self._token
 
+    @property
+    def notebook(self) -> str | None:
+        """The notebook path this client is attached to, or None before use_notebook."""
+        return self._notebook
+
     def _relay_url(self) -> str:
         """Derive the relay WebSocket URL from the configured Jupyter URL."""
         parts = urlsplit(self._jupyter_url)

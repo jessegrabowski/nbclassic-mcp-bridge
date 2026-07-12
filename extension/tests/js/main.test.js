@@ -180,3 +180,127 @@ test("move_cell keeps identity and emits nothing", () => {
     assert.deepEqual(eventsSent(socket, "cell_deleted"), []);
     assert.deepEqual(eventsSent(socket, "cell_created"), []);
 });
+
+
+test("undo_last reverses set/insert/delete/move in reverse order", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "set_source", args: { cell_id: "c1", source: "edited" } });
+    socket.receive({ kind: "cmd", id: 2, op: "insert_cell", args: { index: 2, cell_type: "code", source: "new" } });
+    const insertedId = lastReply(socket, 2).result.cell_id;
+    socket.receive({ kind: "cmd", id: 3, op: "delete_cell", args: { cell_id: "c2" } });
+    socket.receive({ kind: "cmd", id: 4, op: "move_cell", args: { cell_id: "c1", index: 1 } });
+
+    socket.receive({ kind: "cmd", id: 5, op: "undo_last", args: {} });
+    assert.equal(lastReply(socket, 5).result.status, "undone");
+    assert.equal(bridge.notebook.find_cell_index(bridge.cells.find((c) => c.id === "c1")), 0);
+
+    socket.receive({ kind: "cmd", id: 6, op: "undo_last", args: {} });
+    assert.equal(lastReply(socket, 6).result.status, "undone");
+    const restored = bridge.notebook.get_cells().find((c) => c.id === "c2");
+    assert.equal(restored.get_text(), "print(2)");
+
+    socket.receive({ kind: "cmd", id: 7, op: "undo_all", args: {} });
+    const summary = lastReply(socket, 7).result.results.map((r) => r.status);
+    assert.deepEqual(summary, ["undone", "undone"]);
+    assert.equal(bridge.notebook.get_cells().find((c) => c.id === insertedId), undefined);
+    assert.equal(bridge.notebook.get_cells().find((c) => c.id === "c1").get_text(), "print(1)");
+
+    socket.receive({ kind: "cmd", id: 8, op: "undo_last", args: {} });
+    assert.equal(lastReply(socket, 8).result.status, "nothing to undo");
+});
+
+test("undo skips entries the human has touched since", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "set_source", args: { cell_id: "c1", source: "agent" } });
+    bridge.cells[0]._text = "human overwrote"; // bypass set_text so no change event fires
+
+    socket.receive({ kind: "cmd", id: 2, op: "undo_last", args: {} });
+    const reply = lastReply(socket, 2).result;
+    assert.equal(reply.status, "skipped");
+    assert.match(reply.reason, /changed since/);
+    assert.equal(bridge.cells[0].get_text(), "human overwrote");
+});
+
+test("undoing a delete restores the cell's identity, outputs, and position", () => {
+    const outputs = [{ output_type: "stream", name: "stdout", text: "kept\n" }];
+    const bridge = loadBridge([["c1", "print(1)"], ["c2", "print(2)", { outputs }]]);
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "delete_cell", args: { cell_id: "c2" } });
+    socket.receive({ kind: "cmd", id: 2, op: "undo_last", args: {} });
+    assert.equal(lastReply(socket, 2).result.status, "undone");
+    const restored = bridge.notebook.get_cells()[1];
+    assert.equal(restored.id, "c2");
+    assert.deepEqual(restored.outputs, outputs);
+});
+
+test("undo actions emit no human events", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "set_source", args: { cell_id: "c1", source: "agent" } });
+    socket.receive({ kind: "cmd", id: 2, op: "undo_last", args: {} });
+    t.mock.timers.tick(1000);
+    assert.deepEqual(socket.sent.filter((f) => f.kind === "event"), []);
+});
+
+test("the undo stack is bounded", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+    for (let n = 0; n < 60; n++) {
+        socket.receive({ kind: "cmd", id: 100 + n, op: "set_source", args: { cell_id: "c1", source: `v${n}` } });
+    }
+    socket.receive({ kind: "cmd", id: 999, op: "undo_all", args: {} });
+    assert.equal(lastReply(socket, 999).result.results.length, 50);
+});
+
+
+test("reload_notebook does not spray phantom events during repopulation", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "reload_notebook", args: {} });
+    assert.equal(lastReply(socket, 1).result.status, "reloading");
+    t.mock.timers.tick(5000); // repopulation happens after the reply
+    assert.deepEqual(eventsSent(socket, "cell_created"), []);
+});
+
+test("reload_notebook clears stale focus so set_source is not wrongly skipped", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    bridge.events.trigger("edit_mode.Cell", { cell: bridge.cells[0] });
+    socket.receive({ kind: "cmd", id: 1, op: "reload_notebook", args: {} });
+    t.mock.timers.tick(5000);
+
+    socket.receive({ kind: "cmd", id: 2, op: "set_source", args: { cell_id: "c1", source: "after reload" } });
+    assert.equal(lastReply(socket, 2).result.status, "written");
+});
+
+
+test("undo guards refuse to delete or move cells the human drifted", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "insert_cell", args: { index: 0, cell_type: "code", source: "mine" } });
+    const insertedId = lastReply(socket, 1).result.cell_id;
+    bridge.notebook.get_cells()[0]._text = "the human built on this";
+    socket.receive({ kind: "cmd", id: 2, op: "undo_last", args: {} });
+    assert.equal(lastReply(socket, 2).result.status, "skipped");
+    assert.ok(bridge.notebook.get_cells().find((c) => c.id === insertedId), "the edited cell must survive");
+
+    socket.receive({ kind: "cmd", id: 3, op: "move_cell", args: { cell_id: "c1", index: 2 } });
+    const moved = bridge.notebook.get_cells().find((c) => c.id === "c1");
+    bridge.notebook.cells.splice(bridge.notebook.cells.indexOf(moved), 1);
+    bridge.notebook.cells.unshift(moved); // the human moved it somewhere else since
+    socket.receive({ kind: "cmd", id: 4, op: "undo_last", args: {} });
+    assert.equal(lastReply(socket, 4).result.status, "skipped");
+    assert.equal(bridge.notebook.find_cell_index(moved), 0, "the human's placement must survive");
+});

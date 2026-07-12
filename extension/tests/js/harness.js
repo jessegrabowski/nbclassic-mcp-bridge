@@ -155,6 +155,14 @@ function makeNotebook(events, cells) {
             const [removed] = this.cells.splice(index, 1);
             events.trigger("delete.Cell", { cell: removed });
         },
+        load_notebook() {
+            // Mimics the real async contents fetch: population fires create.Cell per cell after
+            // the op that requested the reload has already returned.
+            setTimeout(() => {
+                this.insert_cell_at_index("code", 0);
+                events.trigger("notebook_loaded.Notebook", {});
+            }, 10);
+        },
     };
     return notebook;
 }

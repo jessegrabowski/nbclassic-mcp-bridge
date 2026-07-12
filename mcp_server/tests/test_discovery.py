@@ -3,7 +3,14 @@ import asyncio
 import httpx
 import pytest
 
-from nbclassic_mcp_bridge_mcp.discovery import fetch_rooms, list_sessions, match_notebook, merge_notebook_view
+from nbclassic_mcp_bridge_mcp.discovery import (
+    create_checkpoint,
+    fetch_rooms,
+    list_sessions,
+    match_notebook,
+    merge_notebook_view,
+    restore_checkpoint,
+)
 
 
 def _route_discovery_http(monkeypatch, handler):
@@ -111,3 +118,40 @@ def test_unreachable_server_raises_a_clear_error(monkeypatch):
     _route_discovery_http(monkeypatch, handler)
     with pytest.raises(RuntimeError, match="could not reach the Jupyter server"):
         asyncio.run(list_sessions("http://localhost:1", "tok"))
+
+
+def test_checkpoint_helpers_hit_the_contents_api_with_header_auth(monkeypatch):
+    requests = []
+
+    def handler(request):
+        requests.append((request.method, request.url.path, request.headers.get("Authorization")))
+        return httpx.Response(200, json={"id": "checkpoint"})
+
+    _route_discovery_http(monkeypatch, handler)
+    created = asyncio.run(create_checkpoint("http://localhost:1", "tok", "nb/analysis.ipynb"))
+    asyncio.run(restore_checkpoint("http://localhost:1", "tok", "nb/analysis.ipynb", "checkpoint"))
+
+    assert created == {"id": "checkpoint"}
+    assert requests == [
+        ("POST", "/api/contents/nb/analysis.ipynb/checkpoints", "token tok"),
+        ("POST", "/api/contents/nb/analysis.ipynb/checkpoints/checkpoint", "token tok"),
+    ]
+
+
+def test_checkpoint_paths_are_url_quoted(monkeypatch):
+    # A '#' in a notebook name would otherwise become a URL fragment and target a different file.
+    seen = []
+
+    def handler(request):
+        seen.append(request.url.raw_path)
+        return httpx.Response(200, json={})
+
+    _route_discovery_http(monkeypatch, handler)
+    asyncio.run(create_checkpoint("http://localhost:1", "tok", "my analysis#draft.ipynb"))
+    assert seen == [b"/api/contents/my%20analysis%23draft.ipynb/checkpoints"]
+
+
+def test_restore_tolerates_an_empty_reply_body(monkeypatch):
+    # Jupyter answers checkpoint restores with 204 No Content.
+    _route_discovery_http(monkeypatch, lambda request: httpx.Response(204))
+    assert asyncio.run(restore_checkpoint("http://localhost:1", "tok", "a.ipynb", "checkpoint")) is None

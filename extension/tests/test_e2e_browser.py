@@ -515,6 +515,34 @@ def test_relay_client_reattaches_across_a_server_restart(tmp_path):
     asyncio.run(scenario())
 
 
+def test_undo_reverts_an_agent_edit_in_the_live_notebook(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                await page.goto(f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}")
+                await mcp.recv_until(_extension_joined)
+                cells = await mcp.command("snapshot", {})
+                original = cells[0]["source"]
+
+                await mcp.command("set_source", {"cell_id": cells[0]["cell_id"], "source": "clobbered()"})
+                undone = await mcp.command("undo_last", {})
+                assert undone["status"] == "undone"
+
+                reverted = await page.evaluate(
+                    "(id) => Jupyter.notebook.get_cells().find(c => c.id === id).get_text()",
+                    cells[0]["cell_id"],
+                )
+                assert reverted == original
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_presence_ui_reflects_state_and_pause_blocks_commands(nbclassic_port):
     async def scenario():
         async with async_playwright() as pw:

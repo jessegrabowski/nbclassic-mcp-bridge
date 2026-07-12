@@ -51,6 +51,25 @@ _SEED_NOTEBOOK = {
 }
 
 
+def _spawn_nbclassic(port, nbdir):
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "jupyter",
+            "nbclassic",
+            "--port",
+            str(port),
+            "--no-browser",
+            "--ServerApp.jpserver_extensions={'nbclassic_mcp_bridge':True}",
+        ],
+        cwd=nbdir,
+        env={**os.environ, "JUPYTER_TOKEN": TOKEN},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _free_port():
     listener = socket.socket()
     listener.bind(("", 0))
@@ -75,22 +94,7 @@ def test_read_cell_image_round_trips_over_the_mcp_protocol(tmp_path):
     """Drive the real server binary over stdio: a stored PNG must arrive as an ImageContent block."""
     port = _free_port()
     Path(tmp_path, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
-    server_proc = subprocess.Popen(
-        [
-            sys.executable,
-            "-m",
-            "jupyter",
-            "nbclassic",
-            "--port",
-            str(port),
-            "--no-browser",
-            "--ServerApp.jpserver_extensions={'nbclassic_mcp_bridge':True}",
-        ],
-        cwd=tmp_path,
-        env={**os.environ, "JUPYTER_TOKEN": TOKEN},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    server_proc = _spawn_nbclassic(port, tmp_path)
 
     async def scenario():
         _wait_until_up(port)
@@ -128,6 +132,64 @@ def test_read_cell_image_round_trips_over_the_mcp_protocol(tmp_path):
                     assert isinstance(image, ImageContent)
                     assert image.mimeType == "image/png"
                     assert base64.b64decode(image.data) == base64.b64decode(ONE_PX_PNG)
+
+            await browser.close()
+
+    try:
+        asyncio.run(asyncio.wait_for(scenario(), timeout=180))
+    finally:
+        server_proc.terminate()
+        try:
+            server_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            server_proc.kill()
+
+
+def test_checkpoint_and_restore_revert_the_notebook(tmp_path):
+    port = _free_port()
+    Path(tmp_path, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
+    server_proc = _spawn_nbclassic(port, tmp_path)
+
+    def put_source(source):
+        notebook = json.loads(Path(tmp_path, NOTEBOOK).read_text())
+        notebook["cells"][0]["source"] = source
+        body = json.dumps({"type": "notebook", "format": "json", "content": notebook}).encode()
+        request = urllib.request.Request(
+            f"http://localhost:{port}/api/contents/{NOTEBOOK}?token={TOKEN}",
+            data=body,
+            method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=5)
+
+    async def scenario():
+        _wait_until_up(port)
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            await page.goto(f"http://localhost:{port}/notebooks/{NOTEBOOK}?token={TOKEN}")
+            await page.wait_for_selector(".cell", timeout=20000)
+
+            bridge = StdioServerParameters(
+                command=sys.executable,
+                args=["-m", "nbclassic_mcp_bridge_mcp.server"],
+                env={**os.environ, "JUPYTER_URL": f"http://localhost:{port}", "JUPYTER_TOKEN": TOKEN},
+            )
+            async with stdio_client(bridge) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    await session.call_tool("use_notebook", {})
+
+                    await session.call_tool("checkpoint_notebook", {})
+                    put_source("overwritten_on_disk()")
+
+                    restored = await session.call_tool("restore_notebook_checkpoint", {})
+                    assert "restored" in restored.content[0].text
+
+                    listing = await session.call_tool("read_notebook", {})
+                    listing_text = " ".join(part.text for part in listing.content if hasattr(part, "text"))
+                    assert "show_plot()" in listing_text
+                    assert "overwritten_on_disk" not in listing_text
 
             await browser.close()
 
