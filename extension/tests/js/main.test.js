@@ -20,15 +20,17 @@ function eventsSent(socket, name) {
     return socket.sent.filter((frame) => frame.kind === "event" && frame.name === name);
 }
 
-test("hello carries the protocol version and notebook path", () => {
+test("hello carries the protocol version, notebook path, and capabilities", () => {
     const bridge = loadBridge();
     const socket = connect(bridge);
-    assert.deepEqual(socket.sent[0], {
-        kind: "hello",
-        protocol: 0,
-        role: "extension",
-        notebook: "fake.ipynb",
-    });
+    const hello = socket.sent[0];
+    assert.equal(hello.kind, "hello");
+    assert.equal(hello.protocol, 0);
+    assert.equal(hello.role, "extension");
+    assert.equal(hello.notebook, "fake.ipynb");
+    for (const op of ["snapshot", "set_source", "execute_cell", "inspect", "undo_last", "reload_notebook"]) {
+        assert.ok(hello.capabilities.includes(op), `capabilities must include ${op}`);
+    }
 });
 
 test("snapshot returns every cell; summary mode swaps outputs for summaries", () => {

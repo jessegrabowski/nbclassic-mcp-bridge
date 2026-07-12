@@ -46,6 +46,10 @@ class RelayClient:
         # Serializes connect/close/reattach so concurrent commands cannot tear down each other's sockets.
         self._conn_lock = asyncio.Lock()
         self._extension_joined = asyncio.Event()
+        # Ops the connected browser tab declared in its hello; None until a tab with a
+        # capability-aware extension joins. Lets command() fail with "refresh the tab" instead
+        # of the extension's bare "unknown op".
+        self._extension_capabilities: frozenset[str] | None = None
 
     @property
     def jupyter_url(self) -> str:
@@ -117,6 +121,11 @@ class RelayClient:
         if self._notebook is None:
             raise RuntimeError("not connected -- call use_notebook first")
         await self._ensure_connected()
+        if self._extension_capabilities is not None and op not in self._extension_capabilities:
+            raise RuntimeError(
+                f"the notebook tab's bridge extension does not support '{op}'; "
+                "refresh the browser tab to load the updated extension"
+            )
         try:
             fut = await self._send_cmd(op, args)
         except websockets.ConnectionClosed:
@@ -148,6 +157,7 @@ class RelayClient:
     async def _dial(self, notebook: str) -> None:
         """Open the socket, send the hello, and start the reader. Caller holds the lock."""
         self._extension_joined.clear()
+        self._extension_capabilities = None
         if notebook != self._notebook:
             # Event numbering is per room; a stale position from another notebook means nothing.
             self._relay_log_id = None
@@ -225,9 +235,12 @@ class RelayClient:
                         self._event_log.append((next(self._seq), msg))
                 elif kind == "status" and msg.get("peer") == "extension":
                     if msg.get("state") == "joined":
+                        capabilities = msg.get("capabilities")
+                        self._extension_capabilities = frozenset(capabilities) if capabilities else None
                         self._extension_joined.set()
                     else:
                         self._extension_joined.clear()
+                        self._extension_capabilities = None
         except websockets.ConnectionClosed:
             # The relay closed the socket -- normal read-loop termination.
             pass

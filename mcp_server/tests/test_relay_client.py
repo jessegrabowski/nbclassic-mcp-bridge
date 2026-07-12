@@ -19,10 +19,11 @@ class FakeRelay:
     stamp-and-replay protocol as the real switchboard.
     """
 
-    def __init__(self, replies=None, events=None, extension_joined=False, log_id="fake-log"):
+    def __init__(self, replies=None, events=None, extension_joined=False, log_id="fake-log", capabilities=None):
         self.replies = replies or {}
         self.events = events or []
         self.extension_joined = extension_joined
+        self.capabilities = capabilities
         self.log_id = log_id
         self.hellos: list[dict] = []
         self._server = None
@@ -47,6 +48,11 @@ class FakeRelay:
         for ws in list(self._connections):
             await ws.close(code=1001, reason="replaced by a newer connection")
 
+    async def broadcast(self, frame):
+        """Push a frame to every live connection."""
+        for ws in list(self._connections):
+            await ws.send(json.dumps(frame))
+
     async def _handle(self, ws):
         self._connections.add(ws)
         try:
@@ -55,7 +61,10 @@ class FakeRelay:
                 if msg["kind"] == "hello":
                     self.hellos.append(msg)
                     if self.extension_joined:
-                        await ws.send(json.dumps({"kind": "status", "peer": "extension", "state": "joined"}))
+                        status = {"kind": "status", "peer": "extension", "state": "joined"}
+                        if self.capabilities is not None:
+                            status["capabilities"] = self.capabilities
+                        await ws.send(json.dumps(status))
                     last_seen = msg.get("last_event_seq", 0) if msg.get("log_id") == self.log_id else 0
                     for seq, (name, data) in enumerate(self.events, start=1):
                         if seq > last_seen:
@@ -332,3 +341,97 @@ def test_switching_notebooks_resets_the_replay_position():
     hellos = asyncio.run(scenario())
     assert hellos[0]["last_event_seq"] == 0
     assert hellos[1]["last_event_seq"] == 0 and hellos[1]["log_id"] is None
+
+
+def test_unsupported_ops_fail_fast_with_a_refresh_hint():
+    async def scenario():
+        relay = FakeRelay(extension_joined=True, capabilities=["snapshot", "read_cell"])
+        async with relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            assert await client.extension_present()
+
+            got = await client.command("snapshot", {})  # a declared op passes through
+
+            try:
+                await client.command("undo_last", {})
+            except RuntimeError as exc:
+                message = str(exc)
+            else:
+                message = "did not raise"
+            await client.close()
+            return got, message
+
+    got, message = asyncio.run(scenario())
+    assert got is None
+    assert "does not support 'undo_last'" in message and "refresh the browser tab" in message
+
+
+def test_a_capability_free_extension_is_not_pre_checked():
+    # Legacy tabs declare nothing; their own "unknown op" reply must still come back.
+    async def scenario():
+        replies = {"undo_last": {"ok": False, "error": "unknown op: undo_last"}}
+        async with FakeRelay(replies=replies, extension_joined=True) as relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            try:
+                await client.command("undo_last", {})
+            except RuntimeError as exc:
+                return str(exc)
+            finally:
+                await client.close()
+
+    assert "unknown op" in asyncio.run(scenario())
+
+
+def test_capabilities_do_not_outlive_the_tab_that_declared_them():
+    # After the declaring tab is gone, an unsupported op must surface the relay's "no extension
+    # peer connected", not a misleading hint to refresh a tab that no longer exists.
+    async def scenario():
+        relay = FakeRelay(extension_joined=True, capabilities=["snapshot"])
+        async with relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            assert await client.extension_present()
+
+            await relay.kick()
+            relay.extension_joined = False  # the tab is gone when the client reattaches
+            relay.replies["undo_last"] = {"ok": False, "error": "no extension peer connected"}
+            try:
+                await client.command("undo_last", {})
+            except RuntimeError as exc:
+                return str(exc)
+            finally:
+                await client.close()
+
+    message = asyncio.run(scenario())
+    assert "no extension peer connected" in message
+    assert "refresh the browser tab" not in message
+
+
+def test_capabilities_clear_when_the_tab_leaves_mid_session():
+    # The human closing the tab must not leave the agent pre-checking against a ghost; the
+    # relay's accurate "no extension peer connected" has to win over the refresh hint.
+    async def scenario():
+        relay = FakeRelay(extension_joined=True, capabilities=["snapshot"])
+        relay.replies["undo_last"] = {"ok": False, "error": "no extension peer connected"}
+        async with relay:
+            client = RelayClient(relay.jupyter_url, "tok")
+            await client.connect("nb.ipynb")
+            assert await client.extension_present()
+
+            await relay.broadcast({"kind": "status", "peer": "extension", "state": "left"})
+            await relay.broadcast({"kind": "event", "name": "marker", "data": {}})
+            while not client.events_since(0)[0]:  # FIFO barrier: the left frame arrived first
+                await asyncio.sleep(0.01)
+
+            try:
+                await client.command("undo_last", {})
+            except RuntimeError as exc:
+                return str(exc)
+            finally:
+                await client.close()
+
+    message = asyncio.run(scenario())
+    assert "no extension peer connected" in message
+    assert "refresh the browser tab" not in message

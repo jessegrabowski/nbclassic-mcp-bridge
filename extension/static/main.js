@@ -467,6 +467,7 @@ define([
                 protocol: PROTOCOL_VERSION,
                 role: "extension",
                 notebook: Jupyter.notebook.notebook_path,
+                capabilities: Object.keys(OPS),
             });
         };
         ws.onmessage = function (ev) {

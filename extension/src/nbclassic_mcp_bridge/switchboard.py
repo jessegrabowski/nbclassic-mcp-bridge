@@ -113,6 +113,7 @@ class Switchboard:
 
         peer.role = role
         peer.notebook = notebook
+        peer.capabilities = msg.get("capabilities")
         room = self.rooms.setdefault(notebook, {})
 
         # Reconnect or a second browser tab: evict the stale peer in this role.
@@ -124,12 +125,19 @@ class Switchboard:
 
         target = self._peer(peer)
         if target is not None:
-            # Tell each side that the other is present.
-            _send(target, {"kind": "status", "peer": role, "state": "joined"})
-            _send(peer, {"kind": "status", "peer": _other(role), "state": "joined"})
+            # Tell each side that the other is present, carrying the extension's declared
+            # capabilities so the mcp side can pre-check its commands.
+            _send(target, {"kind": "status", **self._presence_frame(role, "joined", peer)})
+            _send(peer, {"kind": "status", **self._presence_frame(_other(role), "joined", target)})
 
         if role == "mcp":
             self._replay_events(peer, msg)
+
+    def _presence_frame(self, role, state, peer):
+        frame = {"peer": role, "state": state}
+        if role == "extension" and getattr(peer, "capabilities", None) is not None:
+            frame["capabilities"] = peer.capabilities
+        return frame
 
     def _stamp_and_buffer(self, notebook, msg):
         """Number the event, retain it for replay, and return the frame to forward."""
