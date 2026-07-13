@@ -148,9 +148,8 @@ def _extract_images(cell: dict) -> list[tuple[str, str]]:
 def _derive_endpoint(project_path: str) -> tuple[str, str]:
     """Derive a project's Jupyter URL and token from its directory path.
 
-    Mirrors ``nb-token``: the token is the full sha256 hex digest of the physical (symlink-resolved)
-    project path, which is what ``launch-nb`` sets as the server token. ``launch-nb`` serves on the
-    default port, so the URL is the configured ``JUPYTER_URL``.
+    The token is the full sha256 hex digest of the physical (symlink-resolved) project path; the
+    URL is the configured ``JUPYTER_URL``.
     """
     pwd = Path(project_path).expanduser().resolve()
     token = hashlib.sha256(str(pwd).encode()).hexdigest()
@@ -222,10 +221,11 @@ async def use_server(jupyter_url: str, token: str) -> str:
 
 @mcp.tool()
 async def use_project(path: str) -> str:
-    """Retarget the bridge at the launch-nb server for a project directory.
+    """Retarget the bridge at the Jupyter server launched for a project directory.
 
-    Derives the token from ``path`` the way nb-token does; follow with
-    use_notebook to attach to a notebook open on that server.
+    Supports the convention where a project-local server's token is the sha256 hex digest of the
+    project's resolved path. Drops any current attachment; follow with use_notebook to attach to a
+    notebook open on that server.
     """
     jupyter_url, token = _derive_endpoint(path)
     await _relay.retarget(jupyter_url, token)

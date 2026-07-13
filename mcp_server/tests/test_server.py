@@ -16,14 +16,13 @@ from nbclassic_mcp_bridge_mcp.server import (
 )
 
 
-def test_derive_endpoint_matches_nb_token(tmp_path):
-    # nb-token hashes the physical path: sha256(`cd DIR && pwd -P`) as 64 hex chars.
+def test_derive_endpoint_hashes_physical_path(tmp_path):
     url, token = _derive_endpoint(str(tmp_path))
     assert url == _JUPYTER_URL
     assert token == hashlib.sha256(str(tmp_path.resolve()).encode()).hexdigest()
 
 
-def test_derive_endpoint_resolves_symlinks_like_nb_token(tmp_path):
+def test_derive_endpoint_resolves_symlinks(tmp_path):
     real = tmp_path / "project"
     real.mkdir()
     link = tmp_path / "link"
