@@ -1,0 +1,6 @@
+sphinx>=8
+myst-parser
+numpydoc
+pydata-sphinx-theme
+sphinx-copybutton
+sphinx-design

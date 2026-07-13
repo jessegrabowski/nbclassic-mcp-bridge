@@ -1,0 +1,23 @@
+version: 2
+
+sphinx:
+  configuration: docs/source/conf.py
+  fail_on_warning: true
+
+build:
+  os: "ubuntu-24.04"
+  tools:
+    python: "3.13"
+  jobs:
+    # hatch-vcs derives the version from git tags; RTD's default checkout is shallow and
+    # tagless, so fetch tags or the version falls back to 0.0.0+unknown.
+    post_checkout:
+      - git fetch --tags --unshallow || true
+
+python:
+  install:
+    - requirements: docs/requirements.txt
+    - method: pip
+      path: extension/
+    - method: pip
+      path: mcp_server/

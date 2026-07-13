@@ -148,9 +148,8 @@ def _extract_images(cell: dict) -> list[tuple[str, str]]:
 def _derive_endpoint(project_path: str) -> tuple[str, str]:
     """Derive a project's Jupyter URL and token from its directory path.
 
-    Mirrors ``nb-token``: the token is the full sha256 hex digest of the physical (symlink-resolved)
-    project path, which is what ``launch-nb`` sets as the server token. ``launch-nb`` serves on the
-    default port, so the URL is the configured ``JUPYTER_URL``.
+    The token is the full sha256 hex digest of the physical (symlink-resolved) project path; the
+    URL is the configured ``JUPYTER_URL``.
     """
     pwd = Path(project_path).expanduser().resolve()
     token = hashlib.sha256(str(pwd).encode()).hexdigest()
@@ -180,9 +179,9 @@ async def use_notebook(path: str | None = None) -> str:
 
     With no ``path``, attach to the only open notebook (preferring one with a connected browser
     tab); when several are open, list them instead of guessing. A ``path`` that does not exactly
-    match an open notebook is resolved fuzzily (case-insensitive, basename, substring). Say whether
-    the notebook's browser tab is connected: commands only work once the human has the notebook
-    open. Default None.
+    match an open notebook is resolved fuzzily (case-insensitive, basename, substring). The reply
+    states whether the notebook's browser tab is connected -- commands only work once the human has
+    the notebook open. Default None.
     """
     notebooks = await _open_notebooks()
     note = ""
@@ -215,17 +214,21 @@ async def use_notebook(path: str | None = None) -> str:
 
 @mcp.tool()
 async def use_server(jupyter_url: str, token: str) -> str:
-    """Retarget the bridge at a different Jupyter server, then call use_notebook."""
+    """Retarget the bridge at a different Jupyter server.
+
+    Drops any current attachment; follow with use_notebook to attach to a notebook on that server.
+    """
     await _relay.retarget(jupyter_url, token)
     return f"relay target set to {jupyter_url}"
 
 
 @mcp.tool()
 async def use_project(path: str) -> str:
-    """Retarget the bridge at the launch-nb server for a project directory.
+    """Retarget the bridge at the Jupyter server launched for a project directory.
 
-    Derives the token from ``path`` the way nb-token does; follow with
-    use_notebook to attach to a notebook open on that server.
+    Supports the convention where a project-local server's token is the sha256 hex digest of the
+    project's resolved path. Drops any current attachment; follow with use_notebook to attach to a
+    notebook open on that server.
     """
     jupyter_url, token = _derive_endpoint(path)
     await _relay.retarget(jupyter_url, token)
@@ -292,10 +295,10 @@ async def insert_cell(index: int, cell_type: str, source: str) -> dict:
 async def set_cell_source(cell_id: str, source: str) -> dict:
     """Replace a cell's source.
 
-    Returns ``{"cell_id": ..., "status": "written"}`` on success. If the human is currently focused
-    on the target cell the write is skipped to avoid clobbering an in-progress edit, and the return
-    is ``{"cell_id": ..., "status": "skipped", "reason": "focused"}`` — the caller should check
-    ``status`` before assuming the write took effect.
+    Returns ``{"cell_id": ..., "status": "written"}`` on success. If the human currently has the
+    target cell focused, the bridge skips the write to avoid clobbering an in-progress edit and
+    returns ``{"cell_id": ..., "status": "skipped", "reason": "focused"}``, so check ``status``
+    before assuming the write took effect.
     """
     return await _relay.command("set_source", {"cell_id": cell_id, "source": source})
 
@@ -345,8 +348,8 @@ async def inspect_kernel(code: str, timeout_s: float = 30, full: bool = False) -
 async def interrupt_kernel() -> dict:
     """Send a KeyboardInterrupt to the notebook's kernel.
 
-    Stops whatever is currently running -- including a cell the human started -- so reach for it
-    when an execution you triggered is running away.
+    Stops whatever is currently running -- including a cell the human started -- so use it to stop
+    a runaway execution you triggered.
     """
     return await _relay.command("interrupt_kernel", {})
 
