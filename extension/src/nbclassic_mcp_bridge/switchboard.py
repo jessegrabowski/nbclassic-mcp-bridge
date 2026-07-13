@@ -23,8 +23,7 @@ class Switchboard:
 
     Operates on duck-typed *peers*: any object with mutable ``role`` and ``notebook`` attributes
     (both ``None`` until a successful ``hello``) and ``send(text)`` / ``close(code, reason)``
-    methods. ``BridgeHandler`` is the production peer; tests use a list-backed fake. Keeping the
-    routing here, free of any WebSocket type, is what makes it unit-testable without mocking.
+    methods. ``BridgeHandler`` is the production peer; tests use a list-backed fake.
 
     Events from the extension are stamped with a per-room sequence number, retained in a bounded
     buffer, and replayed to an mcp peer that joins (or rejoins) past its declared position.
