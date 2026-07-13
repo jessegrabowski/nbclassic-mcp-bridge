@@ -56,7 +56,20 @@ pre-commit = "*"
 [tool.pixi.feature.lint.tasks]
 lint = "pre-commit run --all-files"
 
+[tool.pixi.feature.docs.tasks]
+docs = "sphinx-build -W -b html docs/source docs/build"
+serve-docs = { cmd = "python -m http.server 8899 --bind 127.0.0.1 --directory docs/build", depends-on = ["docs"] }
+
+[tool.pixi.feature.docs.dependencies]
+sphinx = ">=8"
+myst-parser = "*"
+numpydoc = "*"
+pydata-sphinx-theme = "*"
+sphinx-copybutton = "*"
+sphinx-design = "*"
+
 [tool.pixi.environments]
 default = { features = ["test"], solve-group = "default" }
 lint = { features = ["lint"], no-default-feature = true }
+docs = { features = ["docs"], solve-group = "default" }
 
