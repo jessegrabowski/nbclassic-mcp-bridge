@@ -1,0 +1,22 @@
+name: Read the Docs PR preview
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+      - reopened
+    paths:
+      - "docs/**"
+      - ".readthedocs.yaml"
+
+permissions:
+  pull-requests: write
+
+jobs:
+  documentation-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: readthedocs/actions/preview@v1
+        with:
+          project-slug: "nbclassic-mcp-bridge"
