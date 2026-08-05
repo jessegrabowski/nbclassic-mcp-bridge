@@ -19,6 +19,7 @@ Attaching
 .. autofunction:: use_notebook
 .. autofunction:: detach_notebook
 .. autofunction:: list_notebooks
+.. autofunction:: create_notebook
 .. autofunction:: use_server
 .. autofunction:: use_project
 

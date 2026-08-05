@@ -70,6 +70,17 @@ anything already attached, so notebooks on two Jupyter servers can be held at on
 disambiguated; a single-server session never sees a URL. A server that has gone away contributes an
 error record to the listing instead of failing it, so the notebooks on the others stay visible.
 
+## Creating a notebook
+
+`create_notebook` writes a new `.ipynb` on the Jupyter server, optionally seeded with cells, and
+refuses to overwrite anything already at that path. It creates the file only — no tab opens and the
+bridge does not attach, because the bridge drives notebooks through the browser and a file nobody
+has open has no tab to drive. Open it yourself, then `use_notebook`.
+
+Writing a file directly is the one place the bridge bypasses the browser, and it is deliberately
+limited to files that do not exist yet: there is no in-browser buffer to clobber in a notebook that
+has never been opened.
+
 A plug icon at the right end of the notebook toolbar shows the bridge's state: green when an
 assistant is connected, orange when paused. Clicking it toggles pause; while paused, every
 assistant command is rejected and none of your edits stream out.
