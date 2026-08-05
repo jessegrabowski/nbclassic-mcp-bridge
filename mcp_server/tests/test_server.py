@@ -7,6 +7,7 @@ import pytest
 from nbclassic_mcp_bridge_mcp.registry import Attachment, NotebookRegistry
 from nbclassic_mcp_bridge_mcp.server import (
     _JUPYTER_URL,
+    _OUTPUT_CHAR_LIMIT,
     _cell_output_view,
     _cell_source_view,
     _clean_output,
@@ -242,9 +243,10 @@ def test_use_notebook_names_the_other_attachments(monkeypatch, tab_connected):
 class FakeRelayClient:
     """Minimal relay client for driving a real NotebookRegistry through the tools."""
 
-    def __init__(self, jupyter_url, token):
+    def __init__(self, jupyter_url, token, on_event=None):
         self.jupyter_url = jupyter_url
         self.token = token
+        self.on_event = on_event
         self.notebook = None
         self.commands: list[tuple[str, dict]] = []
 
@@ -261,6 +263,10 @@ class FakeRelayClient:
     async def extension_present(self, timeout=0.5):
         return self.tab_connected
 
+    def emit(self, name, data=None):
+        """Deliver one event the way the read loop does, once it has cleared replay dedup."""
+        self.on_event({"kind": "event", "name": name, "data": data or {}})
+
 
 def _with_registry(monkeypatch, open_notebooks, unreachable=(), tab_connected=True):
     """Install a real registry backed by relay stubs.
@@ -270,8 +276,8 @@ def _with_registry(monkeypatch, open_notebooks, unreachable=(), tab_connected=Tr
     """
     import nbclassic_mcp_bridge_mcp.server as server
 
-    def factory(jupyter_url, token):
-        client = FakeRelayClient(jupyter_url, token)
+    def factory(jupyter_url, token, on_event=None):
+        client = FakeRelayClient(jupyter_url, token, on_event)
         client.tab_connected = tab_connected
         return client
 
@@ -285,6 +291,10 @@ def _with_registry(monkeypatch, open_notebooks, unreachable=(), tab_connected=Tr
 
     monkeypatch.setattr(server, "_open_notebooks", fake_open)
     return server, registry
+
+
+def _clients_by_path(registry):
+    return {attachment.path: registry.client_for(attachment) for attachment in registry.attachments()}
 
 
 def test_list_notebooks_survives_an_unreachable_server(monkeypatch):
@@ -511,7 +521,7 @@ def test_a_tool_dispatches_to_the_named_notebook(monkeypatch, tool_name, kwargs,
         with pytest.raises(expected_error):
             asyncio.run(scenario())
 
-    by_path = {attachment.path: registry.client_for(attachment) for attachment in registry.attachments()}
+    by_path = _clients_by_path(registry)
     assert by_path["nb/a.ipynb"].commands != []
     assert by_path["nb/b.ipynb"].commands == []
 
@@ -556,7 +566,7 @@ def test_restore_targets_the_named_notebook(monkeypatch):
     message = asyncio.run(scenario())
     assert restored == ["nb/a.ipynb"]
     assert "restored nb/a.ipynb" in message
-    by_path = {attachment.path: registry.client_for(attachment) for attachment in registry.attachments()}
+    by_path = _clients_by_path(registry)
     assert by_path["nb/a.ipynb"].commands == [("reload_notebook", {})]
     assert by_path["nb/b.ipynb"].commands == []
 
@@ -613,6 +623,134 @@ def test_omitting_the_notebook_targets_the_current_one(monkeypatch):
         return await server.delete_cell("c1")
 
     assert asyncio.run(scenario())["notebook"] == "nb/b.ipynb"
+
+
+def test_poll_events_names_the_notebook_each_event_came_from(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        clients = _clients_by_path(registry)
+        clients["nb/a.ipynb"].emit("cell_created")
+        clients["nb/b.ipynb"].emit("source_changed")
+        return await server.poll_events()
+
+    result = asyncio.run(scenario())
+    assert [(e["notebook"], e["name"]) for e in result["events"]] == [
+        ("nb/a.ipynb", "cell_created"),
+        ("nb/b.ipynb", "source_changed"),
+    ]
+    assert result["cursor"] == 2
+
+
+def test_poll_events_filters_by_notebook_without_rewinding_the_cursor(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        clients = _clients_by_path(registry)
+        clients["nb/a.ipynb"].emit("cell_created")
+        clients["nb/b.ipynb"].emit("source_changed")
+        filtered = await server.poll_events(notebook="nb/b.ipynb")
+        return filtered, await server.poll_events(cursor=filtered["cursor"])
+
+    filtered, after = asyncio.run(scenario())
+    assert [e["name"] for e in filtered["events"]] == ["source_changed"]
+    assert after["events"] == []
+
+
+def test_polling_the_same_events_twice_does_not_corrupt_their_truncation(monkeypatch):
+    # The cleaners mutate outputs in place and the events stay in the log, so handing them the
+    # stored payload made a second poll re-truncate and understate what was dropped.
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        outputs = [{"output_type": "stream", "text": "z" * 10000}]
+        _clients_by_path(registry)["nb/a.ipynb"].emit("cell_executed", {"outputs": outputs})
+        return await server.poll_events(), await server.poll_events()
+
+    first, second = asyncio.run(scenario())
+    assert first["events"][0]["data"]["outputs"][0]["text"] == second["events"][0]["data"]["outputs"][0]["text"]
+    assert f"{10000 - _OUTPUT_CHAR_LIMIT} more chars" in first["events"][0]["data"]["outputs"][0]["text"]
+
+
+def test_poll_events_can_filter_a_notebook_that_has_since_detached(monkeypatch):
+    # The events outlive the attachment, so the filter that names them has to as well.
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        _clients_by_path(registry)["nb/a.ipynb"].emit("cell_created")
+        await registry.detach(Attachment(DEFAULT_URL, "nb/a.ipynb"))
+        return await server.poll_events(notebook="nb/a.ipynb")
+
+    assert [e["name"] for e in asyncio.run(scenario())["events"]] == ["cell_created"]
+
+
+def test_poll_events_reports_events_that_aged_out(monkeypatch):
+    import nbclassic_mcp_bridge_mcp.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "EVENT_LOG_MAXLEN", 2)
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        client = _clients_by_path(registry)["nb/a.ipynb"]
+        for _ in range(5):
+            client.emit("cell_created")
+        return await server.poll_events()
+
+    result = asyncio.run(scenario())
+    assert len(result["events"]) == 2
+    assert result["dropped"] == 3
+
+
+def test_poll_events_omits_dropped_when_nothing_was_lost(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        _clients_by_path(registry)["nb/a.ipynb"].emit("cell_created")
+        return await server.poll_events()
+
+    assert "dropped" not in asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "filter_name, expected",
+    [("nb/zzz.ipynb", "no retained events"), ("report", "matches several notebooks")],
+    ids=["no-match", "ambiguous"],
+)
+def test_poll_events_rejects_a_filter_it_cannot_resolve(monkeypatch, filter_name, expected):
+    # The poll filter resolves against a different candidate set than the tools do, so its own
+    # failure branches need covering -- they are where the two resolvers drift apart.
+    server, registry = _with_registry(
+        monkeypatch, {DEFAULT_URL: [_record("a/report.ipynb"), _record("b/report.ipynb")]}
+    )
+
+    async def scenario():
+        await registry.attach("a/report.ipynb")
+        await registry.attach("b/report.ipynb")
+        await server.poll_events(notebook=filter_name)
+
+    with pytest.raises(RuntimeError, match=expected):
+        asyncio.run(scenario())
+
+
+def test_poll_events_does_not_retarget_the_current_notebook(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        await server.poll_events(notebook="nb/a.ipynb")
+
+    asyncio.run(scenario())
+    assert registry.is_current(Attachment(DEFAULT_URL, "nb/b.ipynb"))
 
 
 def _with_offset_default(monkeypatch):

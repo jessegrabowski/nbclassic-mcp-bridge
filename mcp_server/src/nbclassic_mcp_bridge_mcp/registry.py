@@ -1,8 +1,15 @@
+import itertools
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
 from nbclassic_mcp_bridge_mcp import discovery
 from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
+
+
+# Cap on retained events, shared across every attached notebook; older ones fall off the poll feed.
+EVENT_LOG_MAXLEN = 1000
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,10 @@ class NotebookRegistry:
         self._client_factory = client_factory
         self._clients: dict[Attachment, RelayClient] = {}
         self._current: Attachment | None = None
+        # One stream across every attachment: the assistant polls once and reads the notebooks'
+        # edits in the order they happened. Each client's own replay dedup runs before this.
+        self._events: deque[tuple[int, Attachment, dict]] = deque(maxlen=EVENT_LOG_MAXLEN)
+        self._event_seq = itertools.count(1)
 
     @property
     def jupyter_url(self) -> str:
@@ -59,7 +70,11 @@ class NotebookRegistry:
         attachment = Attachment(self._jupyter_url, path)
         client = self._clients.get(attachment)
         if client is None:
-            client = self._client_factory(jupyter_url=self._jupyter_url, token=self._token)
+            client = self._client_factory(
+                jupyter_url=self._jupyter_url,
+                token=self._token,
+                on_event=partial(self._record_event, attachment),
+            )
         await client.connect(path)
         self._clients[attachment] = client
         self._current = attachment
@@ -155,15 +170,42 @@ class NotebookRegistry:
         endpoints += [(client.jupyter_url, client.token) for client in self._clients.values()]
         return list(dict.fromkeys(endpoints))
 
-    def events_since(self, cursor: int) -> tuple[list[dict], int]:
-        """Return the current notebook's events after ``cursor``, and the cursor to pass next.
+    def _record_event(self, attachment: Attachment, event: dict) -> None:
+        """File one accepted event into the merged stream under the notebook it came from."""
+        self._events.append((next(self._event_seq), attachment, event))
 
-        Polling before anything is attached yields nothing rather than raising, so an assistant can
-        watch for edits without first committing to a notebook.
+    def events_since(
+        self, cursor: int, notebook: Attachment | None = None
+    ) -> tuple[list[tuple[Attachment, dict]], int]:
+        """Return the events after ``cursor`` paired with the notebook each came from, and the next cursor.
+
+        ``notebook`` filters what comes back; the cursor tracks the merged stream either way, so a
+        filtered poll still advances past the events it did not return. Polling before anything is
+        attached yields nothing rather than raising. Detaching a notebook stops new events arriving
+        but leaves its recorded ones readable.
         """
-        if self._current is None:
-            return [], cursor
-        return self.current().events_since(cursor)
+        fresh = [
+            (attachment, event)
+            for seq, attachment, event in self._events
+            if seq > cursor and (notebook is None or attachment == notebook)
+        ]
+        latest = self._events[-1][0] if self._events else cursor
+        return fresh, latest
+
+    def find_source(self, notebook: str) -> list[Attachment]:
+        """Match ``notebook`` loosely against every notebook the retained events came from.
+
+        Covers detached notebooks, whose events outlive the attachment.
+        """
+        known = list(dict.fromkeys([*self._clients, *(attachment for _, attachment, _ in self._events)]))
+        return discovery.best_matches(notebook, known, key=lambda attachment: attachment.path)
+
+    def dropped_before(self, cursor: int) -> int:
+        """Count the events that aged out of the log before ``cursor`` could reach them."""
+        if not self._events:
+            return 0
+        oldest = self._events[0][0]
+        return max(0, oldest - 1 - cursor)
 
     def retarget(self, jupyter_url: str, token: str) -> None:
         """Point new attachments at a different Jupyter server.
