@@ -59,6 +59,11 @@ than having to remember it. A name matching two attached notebooks is refused ra
 drops one, leaving its browser tab and kernel untouched; detaching the current notebook leaves no
 current notebook until the next `use_notebook`.
 
+`poll_events` stays a single call however many notebooks are attached: one stream, one cursor, and
+every event tagged with the notebook it came from, in the order things happened. Pass `notebook` to
+narrow what comes back — the cursor still tracks the whole stream, so a filtered poll does not
+re-deliver the other notebooks' events later.
+
 `use_server` and `use_project` change where the *next* `use_notebook` looks without disturbing
 anything already attached, so notebooks on two Jupyter servers can be held at once. In that case
 `list_notebooks` adds a `jupyter_url` to each record, and a name attached on both servers has to be

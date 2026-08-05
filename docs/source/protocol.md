@@ -119,6 +119,12 @@ any other position (fresh client, or a `log_id` from a previous relay process) r
 buffer. The buffer lives and dies with the room, and a relay restart empties it — replay covers
 client-side reconnects, not server restarts.
 
+That numbering is per room and never leaves it. An assistant attached to several notebooks holds
+one socket per room, each tracking its own `seq` and `log_id` so a reconnect on one notebook
+cannot make the relay skip another's events. The `seq` and `log_id` are consumed by the MCP
+server and stripped before an event reaches the assistant, which sees a single merged stream
+under its own cursor — see `poll_events` in the tool reference.
+
 ## `status` — relay → peer
 
 Relay-originated. Tells one peer that the other has joined or left, so each side knows
