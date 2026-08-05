@@ -45,6 +45,26 @@ Open a notebook in the browser. From the assistant:
 3. `poll_events` reports what the *human* changed in the meantime — assistant commands are never
    echoed back as events.
 
+## Working in several notebooks
+
+`use_notebook` does not detach whatever came before it, so calling it again adds a second notebook
+and makes it *current*. Every notebook-scoped tool takes an optional `notebook` argument naming
+another attached one; omit it and the tool acts on the current notebook. Names are matched the
+same loose way `use_notebook` matches them, so `execute_cell("c1", notebook="eda")` finds
+`notebooks/2026/eda.ipynb`. Naming a notebook also makes it current, and every tool that changes a
+notebook reports which one it changed — so the assistant is told its target on each call rather
+than having to remember it. A name matching two attached notebooks is refused rather than guessed.
+
+`list_notebooks` marks which notebooks are `attached` and which one is `current`. `detach_notebook`
+drops one, leaving its browser tab and kernel untouched; detaching the current notebook leaves no
+current notebook until the next `use_notebook`.
+
+`use_server` and `use_project` change where the *next* `use_notebook` looks without disturbing
+anything already attached, so notebooks on two Jupyter servers can be held at once. In that case
+`list_notebooks` adds a `jupyter_url` to each record, and a name attached on both servers has to be
+disambiguated; a single-server session never sees a URL. A server that has gone away contributes an
+error record to the listing instead of failing it, so the notebooks on the others stay visible.
+
 A plug icon at the right end of the notebook toolbar shows the bridge's state: green when an
 assistant is connected, orange when paused. Clicking it toggles pause; while paused, every
 assistant command is rejected and none of your edits stream out.

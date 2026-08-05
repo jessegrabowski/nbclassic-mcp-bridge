@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from nbclassic_mcp_bridge_mcp import discovery
 from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
 
 
@@ -73,16 +74,15 @@ class NotebookRegistry:
         # still holding a client whose socket is half gone.
         client = self._clients.pop(attachment, None)
         if client is None:
-            raise RuntimeError(f"{attachment.path} is not attached")
+            raise self.not_attached_error(attachment.path)
         if self._current == attachment:
             self._current = None
         await client.close()
 
-    def current(self) -> RelayClient:
-        """Return the client for the notebook the tools target.
+    def current_attachment(self) -> Attachment:
+        """Return the notebook the tools target.
 
-        Raise RuntimeError when there is no current notebook, naming what is attached so the caller
-        can pick one.
+        Raise RuntimeError when there is none, naming what is attached so the caller can pick one.
         """
         if self._current is None:
             if self._clients:
@@ -90,7 +90,37 @@ class NotebookRegistry:
                     f"no current notebook; attached: {self.attached_listing()} -- call use_notebook to pick one"
                 )
             raise RuntimeError("not attached -- call use_notebook first")
-        return self._clients[self._current]
+        return self._current
+
+    def current(self) -> RelayClient:
+        """Return the client for the notebook the tools target."""
+        return self._clients[self.current_attachment()]
+
+    def find(self, notebook: str) -> list[Attachment]:
+        """Return the attachments matching ``notebook``, loosely, closest tier only.
+
+        Several come back when the name is ambiguous; none when nothing is close.
+        """
+        return discovery.best_matches(notebook, list(self._clients), key=lambda attachment: attachment.path)
+
+    def client_for(self, attachment: Attachment) -> RelayClient:
+        """Return the client for ``attachment`` without changing which notebook is current."""
+        client = self._clients.get(attachment)
+        if client is None:
+            raise self.not_attached_error(attachment.path)
+        return client
+
+    def make_current(self, attachment: Attachment) -> RelayClient:
+        """Point the tools at ``attachment`` and return its client."""
+        client = self.client_for(attachment)
+        self._current = attachment
+        return client
+
+    def not_attached_error(self, name: str) -> RuntimeError:
+        """Build the error for a notebook that is not attached, naming the ones that are."""
+        return RuntimeError(
+            f"'{name}' is not attached; attached: {self.attached_listing()} -- call use_notebook to attach it"
+        )
 
     def attachments(self) -> list[Attachment]:
         """Return every attached notebook, in the order it was first attached."""
@@ -115,10 +145,6 @@ class NotebookRegistry:
     def attached_listing(self) -> str:
         """Name every attached notebook as a sorted comma-separated list, or ``"none"``."""
         return ", ".join(sorted(self.label(attachment) for attachment in self._clients)) or "none"
-
-    def matching(self, path: str) -> list[Attachment]:
-        """Return every attachment whose path is exactly ``path``."""
-        return [attachment for attachment in self._clients if attachment.path == path]
 
     def endpoints(self) -> list[tuple[str, str]]:
         """Return ``(jupyter_url, token)`` for the default server and every attached notebook's.

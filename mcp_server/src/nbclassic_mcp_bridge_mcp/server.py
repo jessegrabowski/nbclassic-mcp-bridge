@@ -9,6 +9,7 @@ from mcp.server.fastmcp import FastMCP, Image
 
 from nbclassic_mcp_bridge_mcp import discovery
 from nbclassic_mcp_bridge_mcp.registry import Attachment, NotebookRegistry
+from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
 
 
 log = logging.getLogger(__name__)
@@ -156,6 +157,44 @@ def _derive_endpoint(project_path: str) -> tuple[str, str]:
     return _JUPYTER_URL, token
 
 
+def _find_attachment(notebook: str | None) -> Attachment:
+    """Resolve a tool's ``notebook`` argument, falling back to the current notebook when omitted.
+
+    Match a name loosely against the attached notebooks. Raise RuntimeError when it matches none or
+    several -- a tool must never act on a guess.
+    """
+    if notebook is None:
+        return _registry.current_attachment()
+    matches = _registry.find(notebook)
+    if not matches:
+        raise _registry.not_attached_error(notebook)
+    if len(matches) > 1:
+        listing = ", ".join(_registry.label(match) for match in matches)
+        raise RuntimeError(f"'{notebook}' matches several attached notebooks ({listing}); name one exactly")
+    return matches[0]
+
+
+def _resolve(notebook: str | None) -> tuple[RelayClient, str]:
+    """Return the client to read from and the name to report, leaving the current notebook alone."""
+    attachment = _find_attachment(notebook)
+    return _registry.client_for(attachment), _registry.label(attachment)
+
+
+def _target(notebook: str | None) -> tuple[RelayClient, str]:
+    """Return the client to act on and the name to report, making it the current notebook.
+
+    Changing or executing a notebook says the assistant is working there; merely reading one does
+    not, so reads go through ``_resolve`` and leave the default where it was.
+    """
+    attachment = _find_attachment(notebook)
+    return _registry.make_current(attachment), _registry.label(attachment)
+
+
+def _echo(result: dict | None, notebook: str) -> dict:
+    """Stamp the notebook a tool acted on into its result, so a mistarget shows up in the reply."""
+    return {**(result or {}), "notebook": notebook}
+
+
 async def _open_notebooks(jupyter_url: str, token: str) -> list[dict]:
     """Fetch the merged discovery view for one Jupyter server."""
     sessions = await discovery.list_sessions(jupyter_url, token)
@@ -269,12 +308,12 @@ async def detach_notebook(notebook: str) -> str:
     keeps working. Detaching the current notebook leaves no current notebook, so call use_notebook
     to pick another.
     """
-    matches = _registry.matching(notebook)
+    matches = _registry.find(notebook)
     if not matches:
-        raise RuntimeError(f"{notebook} is not attached; attached: {_registry.attached_listing()}")
+        raise _registry.not_attached_error(notebook)
     if len(matches) > 1:
         listing = ", ".join(_registry.label(match) for match in matches)
-        return f"'{notebook}' is attached on several servers ({listing}); use_server to pick one, then detach"
+        return f"'{notebook}' matches several attached notebooks ({listing}); name one exactly"
     target = matches[0]
     was_current = _registry.is_current(target)
     await _registry.detach(target)
@@ -283,44 +322,51 @@ async def detach_notebook(notebook: str) -> str:
 
 
 @mcp.tool()
-async def read_notebook() -> list[dict]:
+async def read_notebook(notebook: str | None = None) -> list[dict]:
     """List every cell: id, index, type, source, and an output summary.
 
     Source longer than ~16k chars is truncated; outputs are summarized, not included -- call
-    ``read_cell_source`` / ``read_cell_output`` for one cell.
+    ``read_cell_source`` / ``read_cell_output`` for one cell. Act on the current notebook unless
+    ``notebook`` names another attached one.
     """
-    cells = await _registry.current().command("snapshot", {"outputs": "summary"})
+    client, _ = _resolve(notebook)
+    cells = await client.command("snapshot", {"outputs": "summary"})
     return [_outline_cell(c) for c in cells]
 
 
 @mcp.tool()
-async def read_cell_source(cell_id: str, full: bool = False) -> dict:
+async def read_cell_source(cell_id: str, full: bool = False, notebook: str | None = None) -> dict:
     """Return one cell's source (with its id, index, and type), not its outputs.
 
-    Source longer than ~16k chars is truncated unless ``full`` is true.
+    Source longer than ~16k chars is truncated unless ``full`` is true. Act on the current notebook
+    unless ``notebook`` names another attached one.
     """
-    return _cell_source_view(await _registry.current().command("read_cell", {"cell_id": cell_id}), full)
+    client, _ = _resolve(notebook)
+    return _cell_source_view(await client.command("read_cell", {"cell_id": cell_id}), full)
 
 
 @mcp.tool()
-async def read_cell_output(cell_id: str, full: bool = False) -> dict:
+async def read_cell_output(cell_id: str, full: bool = False, notebook: str | None = None) -> dict:
     """Return one cell's outputs (with its id), not its source.
 
     Long text in each output is truncated unless ``full`` is true. Image payloads are stubbed out
-    (unless ALLOW_IMG_OUTPUT is set); to look at one, call ``read_cell_image``.
+    (unless ALLOW_IMG_OUTPUT is set); to look at one, call ``read_cell_image``. Act on the current
+    notebook unless ``notebook`` names another attached one.
     """
-    return _cell_output_view(await _registry.current().command("read_cell", {"cell_id": cell_id}), full)
+    client, _ = _resolve(notebook)
+    return _cell_output_view(await client.command("read_cell", {"cell_id": cell_id}), full)
 
 
 @mcp.tool()
-async def read_cell_image(cell_id: str, image_index: int = 0) -> Image:
+async def read_cell_image(cell_id: str, image_index: int = 0, notebook: str | None = None) -> Image:
     """Return one of a cell's image outputs as a viewable image.
 
     A cell can hold several images; ``image_index`` picks among them in document order. Default 0
     (the first). Use this to actually look at a plot -- image payloads are stubbed out of every
-    text-returning tool.
+    text-returning tool. Act on the current notebook unless ``notebook`` names another attached one.
     """
-    cell = await _registry.current().command("read_cell", {"cell_id": cell_id})
+    client, _ = _resolve(notebook)
+    cell = await client.command("read_cell", {"cell_id": cell_id})
     images = _extract_images(cell)
     if not images:
         raise RuntimeError(f"cell {cell_id} has no raster image outputs")
@@ -333,136 +379,169 @@ async def read_cell_image(cell_id: str, image_index: int = 0) -> Image:
 
 
 @mcp.tool()
-async def insert_cell(index: int, cell_type: str, source: str) -> dict:
-    """Insert a new cell at ``index``."""
-    return await _registry.current().command("insert_cell", {"index": index, "cell_type": cell_type, "source": source})
+async def insert_cell(index: int, cell_type: str, source: str, notebook: str | None = None) -> dict:
+    """Insert a new cell at ``index``.
+
+    Act on the current notebook unless ``notebook`` names another attached one.
+    """
+    client, target = _target(notebook)
+    args = {"index": index, "cell_type": cell_type, "source": source}
+    return _echo(await client.command("insert_cell", args), target)
 
 
 @mcp.tool()
-async def set_cell_source(cell_id: str, source: str) -> dict:
+async def set_cell_source(cell_id: str, source: str, notebook: str | None = None) -> dict:
     """Replace a cell's source.
 
     Returns ``{"cell_id": ..., "status": "written"}`` on success. If the human currently has the
     target cell focused, the bridge skips the write to avoid clobbering an in-progress edit and
     returns ``{"cell_id": ..., "status": "skipped", "reason": "focused"}``, so check ``status``
-    before assuming the write took effect.
+    before assuming the write took effect. Act on the current notebook unless ``notebook`` names
+    another attached one.
     """
-    return await _registry.current().command("set_source", {"cell_id": cell_id, "source": source})
+    client, target = _target(notebook)
+    return _echo(await client.command("set_source", {"cell_id": cell_id, "source": source}), target)
 
 
 @mcp.tool()
-async def execute_cell(cell_id: str, timeout_s: float = 120) -> dict:
+async def execute_cell(cell_id: str, timeout_s: float = 120, notebook: str | None = None) -> dict:
     """Execute a cell in the live UI and return its outputs (long text truncated).
 
     Raise a timeout error if the cell is still running after ``timeout_s`` seconds (the cell itself
-    keeps running). Default 120.
+    keeps running). Default 120. Act on the current notebook unless ``notebook`` names another
+    attached one.
     """
+    client, target = _target(notebook)
     args = {"cell_id": cell_id, "timeout_ms": int(timeout_s * 1000)}
-    return _cell_output_view(await _registry.current().command("execute_cell", args), full=False)
+    return _echo(_cell_output_view(await client.command("execute_cell", args), full=False), target)
 
 
 @mcp.tool()
-async def run_cells(cell_ids: list[str], timeout_s: float = 600) -> dict:
+async def run_cells(cell_ids: list[str], timeout_s: float = 600, notebook: str | None = None) -> dict:
     """Execute several cells with one call, returning per-cell outputs in the requested order.
 
     Executions queue in the kernel like the notebook's Run All, so an error in one cell aborts the
     ones after it. On timeout, finished cells keep their outputs and unfinished ones are marked
-    "timed out" (they keep running in the kernel). Long text is truncated. Default timeout 600.
+    "timed out" (they keep running in the kernel). Long text is truncated. Default timeout 600. Act
+    on the current notebook unless ``notebook`` names another attached one.
     """
-    result = await _registry.current().command("run_cells", {"cell_ids": cell_ids, "timeout_ms": int(timeout_s * 1000)})
+    client, target = _target(notebook)
+    result = await client.command("run_cells", {"cell_ids": cell_ids, "timeout_ms": int(timeout_s * 1000)})
     for cell_result in result.get("results", []):
         for output in cell_result.get("outputs", []):
             _clean_output(output)
-    return result
+    return _echo(result, target)
 
 
 @mcp.tool()
-async def inspect_kernel(code: str, timeout_s: float = 30, full: bool = False) -> dict:
+async def inspect_kernel(code: str, timeout_s: float = 30, full: bool = False, notebook: str | None = None) -> dict:
     """Evaluate code in the notebook's live kernel without touching cells, outputs, or history.
 
     Nothing appears in the notebook and the In[]/Out[] counters are unchanged, so use this to look
     at state -- ``df.shape``, ``data.columns``, ``locals().keys()`` -- rather than to do work the
     human should see. Returns ``{status, outputs}``; long text is truncated unless ``full`` is
-    true. Default timeout 30.
+    true. Default timeout 30. Act on the current notebook unless ``notebook`` names another
+    attached one.
     """
-    result = await _registry.current().command("inspect", {"code": code, "timeout_ms": int(timeout_s * 1000)})
+    client, _ = _resolve(notebook)
+    result = await client.command("inspect", {"code": code, "timeout_ms": int(timeout_s * 1000)})
     for output in result.get("outputs", []):
         _clean_output(output, truncate=not full)
     return result
 
 
 @mcp.tool()
-async def interrupt_kernel() -> dict:
+async def interrupt_kernel(notebook: str | None = None) -> dict:
     """Send a KeyboardInterrupt to the notebook's kernel.
 
     Stops whatever is currently running -- including a cell the human started -- so use it to stop
-    a runaway execution you triggered.
+    a runaway execution you triggered. Act on the current notebook unless ``notebook`` names another
+    attached one.
     """
-    return await _registry.current().command("interrupt_kernel", {})
+    client, _ = _target(notebook)
+    return await client.command("interrupt_kernel", {})
 
 
 @mcp.tool()
-async def kernel_status() -> dict:
+async def kernel_status(notebook: str | None = None) -> dict:
     """Report the kernel's last known lifecycle state, connectivity, and name.
 
     ``execute_cell`` and ``inspect_kernel`` fail immediately with "kernel is not connected" while
-    the kernel is dead or restarting; poll here (or watch kernel_status events) before retrying.
+    the kernel is dead or restarting; poll here (or watch kernel_status events) before retrying. The
+    result names the notebook it describes. Act on the current notebook unless ``notebook`` names
+    another attached one.
     """
-    return await _registry.current().command("kernel_info", {})
+    client, target = _resolve(notebook)
+    return _echo(await client.command("kernel_info", {}), target)
 
 
 @mcp.tool()
-async def delete_cell(cell_id: str) -> dict:
-    """Delete a cell by id."""
-    return await _registry.current().command("delete_cell", {"cell_id": cell_id})
+async def delete_cell(cell_id: str, notebook: str | None = None) -> dict:
+    """Delete a cell by id.
+
+    Act on the current notebook unless ``notebook`` names another attached one.
+    """
+    client, target = _target(notebook)
+    return _echo(await client.command("delete_cell", {"cell_id": cell_id}), target)
 
 
 @mcp.tool()
-async def move_cell(cell_id: str, index: int) -> dict:
-    """Move a cell to a new index in the notebook."""
-    return await _registry.current().command("move_cell", {"cell_id": cell_id, "index": index})
+async def move_cell(cell_id: str, index: int, notebook: str | None = None) -> dict:
+    """Move a cell to a new index in the notebook.
+
+    Act on the current notebook unless ``notebook`` names another attached one.
+    """
+    client, target = _target(notebook)
+    return _echo(await client.command("move_cell", {"cell_id": cell_id, "index": index}), target)
 
 
 @mcp.tool()
-async def undo_last_change() -> dict:
+async def undo_last_change(notebook: str | None = None) -> dict:
     """Undo your most recent notebook mutation (set/insert/delete/move; executions are not undoable).
 
     An entry is skipped rather than applied when the human has touched that cell since, so undo can
     never destroy human work; skipped or not, the entry is consumed. Returns what was undone or why
-    it was skipped.
+    it was skipped. The undo stack is per notebook. Act on the current notebook unless ``notebook``
+    names another attached one.
     """
-    return await _registry.current().command("undo_last", {})
+    client, target = _target(notebook)
+    return _echo(await client.command("undo_last", {}), target)
 
 
 @mcp.tool()
-async def undo_all_changes() -> dict:
+async def undo_all_changes(notebook: str | None = None) -> dict:
     """Undo every recorded mutation of yours, newest first, with per-entry results.
 
     Entries the human has since touched are skipped, not applied (and consumed either way);
-    executions are not undoable.
+    executions are not undoable. Undoes one notebook's stack: act on the current notebook unless
+    ``notebook`` names another attached one.
     """
-    return await _registry.current().command("undo_all", {})
+    client, target = _target(notebook)
+    return _echo(await client.command("undo_all", {}), target)
 
 
 @mcp.tool()
-async def checkpoint_notebook() -> dict:
-    """Checkpoint the attached notebook's saved file as a restore point.
+async def checkpoint_notebook(notebook: str | None = None) -> dict:
+    """Checkpoint a notebook's saved file as a restore point.
 
     Uses Jupyter's single default checkpoint slot -- the same one the human's "Save and
-    Checkpoint" writes -- so create one deliberately, not routinely.
+    Checkpoint" writes -- so create one deliberately, not routinely. Act on the current notebook
+    unless ``notebook`` names another attached one.
     """
-    client = _registry.current()
-    return await discovery.create_checkpoint(client.jupyter_url, client.token, client.notebook)
+    client, target = _target(notebook)
+    record = await discovery.create_checkpoint(client.jupyter_url, client.token, client.notebook)
+    return _echo(record, target)
 
 
 @mcp.tool()
-async def restore_notebook_checkpoint() -> str:
-    """Revert the attached notebook to its checkpoint and reload it in the browser.
+async def restore_notebook_checkpoint(notebook: str | None = None) -> str:
+    """Revert a notebook to its checkpoint and reload it in the browser.
 
     DESTRUCTIVE: the file on disk reverts to the checkpoint and the browser tab reloads from disk,
-    discarding any unsaved edits (the human's included). Confirm with the human first.
+    discarding any unsaved edits (the human's included). Confirm with the human first. Act on the
+    current notebook unless ``notebook`` names another attached one.
     """
-    client = _registry.current()
+    client, _ = _target(notebook)
     url, token, path = client.jupyter_url, client.token, client.notebook
     checkpoints = await discovery.list_checkpoints(url, token, path)
     if not checkpoints:

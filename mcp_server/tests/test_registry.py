@@ -200,6 +200,31 @@ def test_label_names_the_path_and_qualifies_only_on_a_collision():
     assert registry.label(Attachment(DEFAULT_URL, "nb/b.ipynb")) == "nb/b.ipynb"
 
 
+def test_find_matches_loosely_and_reports_every_tie():
+    registry, _ = build()
+
+    async def scenario():
+        await registry.attach("notebooks/2026/analysis.ipynb")
+        await registry.attach("archive/analysis.ipynb")
+        await registry.attach("nb/other.ipynb")
+
+    asyncio.run(scenario())
+    assert registry.find("nb/other.ipynb") == [Attachment(DEFAULT_URL, "nb/other.ipynb")]
+    assert registry.find("2026/analysis") == [Attachment(DEFAULT_URL, "notebooks/2026/analysis.ipynb")]
+    assert {attachment.path for attachment in registry.find("analysis.ipynb")} == {
+        "notebooks/2026/analysis.ipynb",
+        "archive/analysis.ipynb",
+    }
+    assert registry.find("nothing-like-this") == []
+
+
+def test_make_current_refuses_an_unattached_notebook():
+    registry, _ = build()
+    asyncio.run(registry.attach("nb/a.ipynb"))
+    with pytest.raises(RuntimeError, match="not attached"):
+        registry.make_current(Attachment(DEFAULT_URL, "nb/zzz.ipynb"))
+
+
 def test_detach_drops_one_notebook_and_leaves_the_rest():
     registry, created = build()
 
