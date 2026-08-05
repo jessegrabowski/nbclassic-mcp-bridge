@@ -73,9 +73,14 @@ error record to the listing instead of failing it, so the notebooks on the other
 ## Creating a notebook
 
 `create_notebook` writes a new `.ipynb` on the Jupyter server, optionally seeded with cells, and
-refuses to overwrite anything already at that path. It creates the file only — no tab opens and the
-bridge does not attach, because the bridge drives notebooks through the browser and a file nobody
-has open has no tab to drive. Open it yourself, then `use_notebook`.
+refuses to overwrite anything already at that path. By default it creates the file only — open it
+yourself, then `use_notebook`.
+
+With `open=True` it also asks a tab you already have open to open the new notebook in a tab of its
+own, then attaches to it and makes it current. That needs an attached tab on the same server to ask,
+and a browser willing to open the tab; when either is missing, the reply says so and gives you the
+URL to open by hand. Nothing is lost in that case — the file exists either way, and `use_notebook`
+finishes the job once the tab is up.
 
 Writing a file directly is the one place the bridge bypasses the browser, and it is deliberately
 limited to files that do not exist yet: there is no in-browser buffer to clobber in a notebook that
