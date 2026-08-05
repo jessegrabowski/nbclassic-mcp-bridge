@@ -405,7 +405,7 @@ async def checkpoint_notebook() -> dict:
     Checkpoint" writes -- so create one deliberately, not routinely.
     """
     session = _registry.current()
-    return await discovery.create_checkpoint(_registry.jupyter_url, _registry.token, session.notebook)
+    return await discovery.create_checkpoint(session.jupyter_url, session.token, session.notebook)
 
 
 @mcp.tool()
@@ -416,7 +416,7 @@ async def restore_notebook_checkpoint() -> str:
     discarding any unsaved edits (the human's included). Confirm with the human first.
     """
     session = _registry.current()
-    url, token, path = _registry.jupyter_url, _registry.token, session.notebook
+    url, token, path = session.jupyter_url, session.token, session.notebook
     checkpoints = await discovery.list_checkpoints(url, token, path)
     if not checkpoints:
         raise RuntimeError(f"no checkpoint exists for {path}; call checkpoint_notebook first")

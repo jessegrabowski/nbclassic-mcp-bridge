@@ -239,6 +239,85 @@ def test_use_notebook_attaches_verbatim_when_nothing_matches(monkeypatch):
     assert "no browser tab is connected" in message and "nb/a.ipynb" in message
 
 
+class StubSession:
+    """Attached-notebook double carrying its own endpoint, which need not be the registry default."""
+
+    def __init__(self, notebook="nb/a.ipynb"):
+        self.notebook = notebook
+        self.jupyter_url = "http://other:9999"
+        self.token = "tok-other"
+        self.commands: list[tuple[str, dict]] = []
+
+    async def command(self, op, args):
+        self.commands.append((op, args))
+        return {}
+
+
+class StubSessionRegistry:
+    """Registry double whose default endpoint differs from its attached notebook's."""
+
+    def __init__(self, session):
+        self.jupyter_url = "http://localhost:8888"
+        self.token = "tok-default"
+        self._session = session
+
+    def current(self):
+        return self._session
+
+
+def _with_session(monkeypatch):
+    import nbclassic_mcp_bridge_mcp.server as server
+
+    session = StubSession()
+    monkeypatch.setattr(server, "_registry", StubSessionRegistry(session))
+    return server, session
+
+
+def test_checkpoint_uses_the_attached_notebooks_own_endpoint(monkeypatch):
+    # A notebook stays attached to the server it was attached against, so checkpointing has to
+    # talk to that server rather than wherever the registry currently points.
+    server, _ = _with_session(monkeypatch)
+    calls = []
+
+    async def create(url, token, path):
+        calls.append((url, token, path))
+        return {"id": "cp1"}
+
+    monkeypatch.setattr(server.discovery, "create_checkpoint", create)
+    assert asyncio.run(server.checkpoint_notebook()) == {"id": "cp1"}
+    assert calls == [("http://other:9999", "tok-other", "nb/a.ipynb")]
+
+
+def test_restore_uses_the_attached_notebooks_own_endpoint(monkeypatch):
+    server, session = _with_session(monkeypatch)
+    seen = []
+
+    async def list_checkpoints(url, token, path):
+        seen.append(("list", url, token, path))
+        return [{"id": "cp1"}]
+
+    async def restore(url, token, path, checkpoint_id):
+        seen.append(("restore", url, token, path))
+
+    monkeypatch.setattr(server.discovery, "list_checkpoints", list_checkpoints)
+    monkeypatch.setattr(server.discovery, "restore_checkpoint", restore)
+    message = asyncio.run(server.restore_notebook_checkpoint())
+    assert seen == [
+        ("list", "http://other:9999", "tok-other", "nb/a.ipynb"),
+        ("restore", "http://other:9999", "tok-other", "nb/a.ipynb"),
+    ]
+    assert session.commands == [("reload_notebook", {})]
+    assert "restored nb/a.ipynb to checkpoint cp1" in message
+
+
+def test_checkpoint_without_an_attachment_points_at_use_notebook(monkeypatch):
+    import nbclassic_mcp_bridge_mcp.server as server
+
+    monkeypatch.setattr(server, "_registry", StubRegistry())
+    with pytest.raises(RuntimeError, match="use_notebook first"):
+        asyncio.run(server.checkpoint_notebook())
+
+
 def test_restore_without_a_checkpoint_gives_an_actionable_error(monkeypatch):
     import nbclassic_mcp_bridge_mcp.server as server
 
