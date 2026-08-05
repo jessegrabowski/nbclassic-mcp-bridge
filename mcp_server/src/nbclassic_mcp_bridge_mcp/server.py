@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import logging
@@ -27,6 +28,12 @@ _registry = NotebookRegistry(jupyter_url=_JUPYTER_URL, token=os.environ.get("JUP
 # it is the content worth reading.
 _OUTPUT_CHAR_LIMIT = 4096
 _SOURCE_CHAR_LIMIT = 16384
+
+# How long a newly opened tab has to reach the relay, and how often the rooms endpoint is checked
+# while waiting. A tab that takes longer is reported as not yet arrived rather than waited on: the
+# attachment is the only thing missing, and use_notebook completes it whenever the human is ready.
+_TAB_ARRIVAL_TIMEOUT_S = 15.0
+_ROOM_POLL_INTERVAL_S = 0.25
 
 
 class SeedCell(TypedDict):
@@ -323,20 +330,99 @@ async def use_project(path: str) -> str:
     return f"new attachments will use {jupyter_url} (derived from {path})"
 
 
+async def _attach_when_tab_arrives(path: str, timeout: float) -> RelayClient | None:
+    """Attach to ``path`` once a browser tab for it joins the relay; return None if none arrives.
+
+    Parameters
+    ----------
+    path : str
+        Server-relative path of the notebook whose tab is expected.
+    timeout : float
+        Seconds to wait for the tab before giving up.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        rooms = await discovery.fetch_rooms(_registry.jupyter_url, _registry.token)
+        if "extension" in rooms.get(path, []):
+            return await _registry.attach(path)
+        if loop.time() >= deadline:
+            return None
+        await asyncio.sleep(_ROOM_POLL_INTERVAL_S)
+
+
+async def _tab_that_can_open() -> RelayClient | None:
+    """Return an attached tab on the default server that can be asked to open another notebook.
+
+    Prefer the current notebook's tab, since that is the window the human is looking at. Tabs on
+    other servers are no use: a tab can only open a notebook its own server serves.
+    """
+    on_default = [
+        attachment for attachment in _registry.attachments() if attachment.jupyter_url == _registry.jupyter_url
+    ]
+    try:
+        current = _registry.current_attachment()
+    except RuntimeError:
+        current = None
+    ordered = [attachment for attachment in on_default if attachment == current]
+    ordered += [attachment for attachment in on_default if attachment != current]
+    for attachment in ordered:
+        client = _registry.client_for(attachment)
+        if await client.extension_present():
+            return client
+    return None
+
+
+async def _open_and_attach(created: str) -> str:
+    """Ask a tab to open the notebook at ``created``, attach once its tab arrives, and report back.
+
+    Every failure names the notebook's URL so the human can open it by hand, because the file
+    exists from here on and only the attachment is missing.
+    """
+    url = discovery.notebook_url(_registry.jupyter_url, created)
+    by_hand = f"open {url} yourself, then call use_notebook to attach"
+    opener = await _tab_that_can_open()
+    if opener is None:
+        return f"created {created}, but no attached tab could be asked to open it; {by_hand}"
+    try:
+        result = await opener.command("open_notebook", {"path": created})
+    except RuntimeError as exc:
+        return f"created {created}, but the tab could not open it ({exc}); {by_hand}"
+    # A peer that replies without a result payload leaves command() returning None.
+    result = result or {}
+    if not result.get("opened"):
+        reason = result.get("reason", "no reason given")
+        return f"created {created}, but the browser refused the new tab ({reason}); {by_hand}"
+    if await _attach_when_tab_arrives(created, _TAB_ARRIVAL_TIMEOUT_S) is None:
+        return (
+            f"created {created} and a tab was opened for it, but that tab has not reached the bridge "
+            f"within {_TAB_ARRIVAL_TIMEOUT_S:.0f}s; call use_notebook once it has finished loading"
+        )
+    return f"created {created}, opened it in a new tab, and attached; it is now the current notebook"
+
+
 @mcp.tool()
-async def create_notebook(path: str, cells: list[SeedCell] | None = None, kernel_name: str | None = None) -> str:
+async def create_notebook(
+    path: str, cells: list[SeedCell] | None = None, kernel_name: str | None = None, open: bool = False
+) -> str:
     """Create a new notebook file on the Jupyter server, optionally seeded with cells.
 
-    Writes the file only -- no browser tab opens and the bridge does not attach, so follow up by
-    asking the human to open it and then calling use_notebook. ``path`` must end in .ipynb, is not
-    created if anything is already there, and its parent directories must already exist. ``cells``
-    are ``{cell_type, source}`` mappings in order; ``kernel_name`` records a kernel in the
-    notebook's metadata, and omitting it lets Jupyter pick its default. Default cells None,
-    kernel_name None.
+    With ``open`` set, ask an attached browser tab to open the new notebook in a tab of its own and
+    attach to it, leaving it the current notebook; the reply says plainly when that could not be
+    done and what to open by hand. Otherwise the file is written and nothing else happens, so
+    follow up by asking the human to open it and then calling use_notebook. ``path`` must end in
+    .ipynb, is not created if anything is already there, and its parent directories must already
+    exist. ``cells`` are ``{cell_type, source}`` mappings in order; ``kernel_name`` records a kernel
+    in the notebook's metadata, and omitting it lets Jupyter pick its default. Default cells None,
+    kernel_name None, open False.
     """
     record = await discovery.create_notebook(_registry.jupyter_url, _registry.token, path, cells, kernel_name)
     created = record.get("path", path)
-    return f"created {created} on {_registry.jupyter_url}; open it in the classic UI, then call use_notebook to attach"
+    if not open:
+        return (
+            f"created {created} on {_registry.jupyter_url}; open it in the classic UI, then call use_notebook to attach"
+        )
+    return await _open_and_attach(created)
 
 
 @mcp.tool()

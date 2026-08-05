@@ -106,6 +106,11 @@ def match_notebook(requested: str, available: list[str]) -> tuple[str | None, li
     return None, sorted(matched)
 
 
+def notebook_url(jupyter_url: str, path: str) -> str:
+    """Return the classic-UI URL a human opens to reach the notebook at ``path``."""
+    return f"{jupyter_url.rstrip('/')}/notebooks/{quote(path.lstrip('/'))}"
+
+
 async def create_notebook(
     jupyter_url: str, token: str, path: str, cells: list[dict] | None = None, kernel_name: str | None = None
 ) -> dict:

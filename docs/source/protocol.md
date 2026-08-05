@@ -61,6 +61,7 @@ focus, so the tab the human is actually using holds the bridge.
 | `undo_last`    | `{}`                                          | `{status, undid?, reason?}` — reverts the newest recorded mcp mutation; skipped if the human touched that cell since |
 | `undo_all`     | `{}`                                          | `{results}` — one `undo_last` result per entry, newest first |
 | `reload_notebook` | `{}`                                       | `{status}` — re-reads the notebook from disk, discarding the browser buffer and the undo stack |
+| `open_notebook` | `{path}`                                     | `{opened, url}` — opens another notebook in a new browser tab; a popup blocker refusing gives `{opened: false, reason: "popup blocked", url}`, and `url` is absolute so a human can open it by hand |
 
 A cell is `{cell_id, index, cell_type, source, outputs}`. With `snapshot`'s
 `outputs: "summary"`, each cell instead carries `output_summary` — a compact,

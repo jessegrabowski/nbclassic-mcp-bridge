@@ -170,6 +170,7 @@ DEFAULT_URL = "http://a:8888"
 TOKEN = "tok-a"
 OTHER_URL = "http://b:9999"
 OTHER_TOKEN = "tok-b"
+NEW_NOTEBOOK_URL = f"{DEFAULT_URL}/notebooks/nb/new.ipynb"
 
 
 def _run_use_notebook(monkeypatch, notebooks, path=None, tab_connected=True):
@@ -249,6 +250,10 @@ class FakeRelayClient:
         self.on_event = on_event
         self.notebook = None
         self.commands: list[tuple[str, dict]] = []
+        # Replies keyed by op; anything unlisted answers with an empty result. None stands for a
+        # reply that carried no result payload at all.
+        self.results: dict[str, dict | None] = {}
+        self.fails_with: str | None = None
 
     async def connect(self, path):
         self.notebook = path
@@ -258,7 +263,9 @@ class FakeRelayClient:
 
     async def command(self, op, args):
         self.commands.append((op, args))
-        return {}
+        if self.fails_with is not None:
+            raise RuntimeError(self.fails_with)
+        return self.results.get(op, {})
 
     async def extension_present(self, timeout=0.5):
         return self.tab_connected
@@ -322,6 +329,80 @@ def test_create_notebook_reports_the_path_the_server_used(monkeypatch):
     assert "created nb/new.ipynb" in message
 
 
+def _rooms_returning(monkeypatch, server, *answers):
+    """Answer successive fetch_rooms calls from ``answers``, repeating the last one forever."""
+    calls = []
+
+    async def fake_rooms(jupyter_url, token):
+        calls.append(jupyter_url)
+        return answers[min(len(calls) - 1, len(answers) - 1)]
+
+    monkeypatch.setattr(server.discovery, "fetch_rooms", fake_rooms)
+    monkeypatch.setattr(server, "_ROOM_POLL_INTERVAL_S", 0)
+    return calls
+
+
+def test_attach_when_tab_arrives_waits_for_the_room_to_gain_an_extension(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {})
+    calls = _rooms_returning(monkeypatch, server, {}, {"nb/new.ipynb": ["mcp"]}, {"nb/new.ipynb": ["extension"]})
+
+    client = asyncio.run(server._attach_when_tab_arrives("nb/new.ipynb", timeout=5))
+
+    assert client is not None
+    # A room with only an mcp peer is a room nobody's browser is in; polling has to continue.
+    assert len(calls) == 3
+    assert [attachment.path for attachment in registry.attachments()] == ["nb/new.ipynb"]
+
+
+def test_attach_when_tab_arrives_gives_up_without_attaching(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {})
+    _rooms_returning(monkeypatch, server, {})
+
+    assert asyncio.run(server._attach_when_tab_arrives("nb/new.ipynb", timeout=0)) is None
+    assert registry.attachments() == []
+
+
+def test_the_tab_asked_to_open_is_the_current_one(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        # Current is deliberately not the newest attachment, or picking either would look right.
+        registry.make_current(Attachment(DEFAULT_URL, "nb/a.ipynb"))
+        return await server._tab_that_can_open()
+
+    assert asyncio.run(scenario()) is registry.client_for(Attachment(DEFAULT_URL, "nb/a.ipynb"))
+
+
+def test_a_disconnected_current_tab_falls_through_to_another(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        current = await registry.attach("nb/b.ipynb")
+        current.tab_connected = False
+        return await server._tab_that_can_open()
+
+    assert asyncio.run(scenario()) is registry.client_for(Attachment(DEFAULT_URL, "nb/a.ipynb"))
+
+
+def test_a_tab_on_another_server_is_never_asked_to_open(monkeypatch):
+    # A tab can only open notebooks its own server serves, so one on another server is no help.
+    server, _ = _with_offset_default(monkeypatch)
+    assert asyncio.run(server._tab_that_can_open()) is None
+
+
+def test_a_disconnected_tab_is_not_asked_to_open(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]}, tab_connected=False)
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        return await server._tab_that_can_open()
+
+    assert asyncio.run(scenario()) is None
+
+
 def test_create_notebook_surfaces_a_refusal(monkeypatch):
     server, _ = _with_registry(monkeypatch, {})
 
@@ -331,6 +412,98 @@ def test_create_notebook_surfaces_a_refusal(monkeypatch):
     monkeypatch.setattr(server.discovery, "create_notebook", create)
     with pytest.raises(RuntimeError, match="already exists"):
         asyncio.run(server.create_notebook("nb/taken.ipynb"))
+
+
+def _creating(monkeypatch, server):
+    """Make discovery.create_notebook succeed, echoing back the path it was given."""
+
+    async def create(jupyter_url, token, path, cells, kernel_name):
+        return {"path": path}
+
+    monkeypatch.setattr(server.discovery, "create_notebook", create)
+
+
+def test_create_notebook_open_asks_a_tab_then_attaches(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    _creating(monkeypatch, server)
+    _rooms_returning(monkeypatch, server, {"nb/new.ipynb": ["extension"]})
+
+    async def scenario():
+        opener = await registry.attach("nb/a.ipynb")
+        opener.results["open_notebook"] = {"opened": True, "url": NEW_NOTEBOOK_URL}
+        return await server.create_notebook("nb/new.ipynb", open=True), opener
+
+    message, opener = asyncio.run(scenario())
+    assert opener.commands == [("open_notebook", {"path": "nb/new.ipynb"})]
+    assert "opened it in a new tab, and attached" in message
+    assert registry.is_current(Attachment(DEFAULT_URL, "nb/new.ipynb"))
+
+
+def test_create_notebook_open_says_what_to_open_when_no_tab_can_be_asked(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {})
+    _creating(monkeypatch, server)
+
+    message = asyncio.run(server.create_notebook("nb/new.ipynb", open=True))
+
+    assert "no attached tab could be asked" in message
+    assert NEW_NOTEBOOK_URL in message
+    assert registry.attachments() == []
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected_reason"),
+    # None stands for a reply that carried no result payload: command() returns reply["result"], so
+    # a peer answering ok without one hands back None, and a raw AttributeError there would bury
+    # the fact that the file was created.
+    [({"opened": False, "reason": "popup blocked"}, "popup blocked"), (None, "no reason given")],
+    ids=["refused with a reason", "reply carrying no result"],
+)
+def test_create_notebook_open_reports_a_refusal_with_the_url(monkeypatch, reply, expected_reason):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    _creating(monkeypatch, server)
+
+    async def scenario():
+        opener = await registry.attach("nb/a.ipynb")
+        opener.results["open_notebook"] = reply
+        return await server.create_notebook("nb/new.ipynb", open=True)
+
+    message = asyncio.run(scenario())
+    assert "created nb/new.ipynb" in message
+    assert expected_reason in message
+    assert NEW_NOTEBOOK_URL in message
+    assert not registry.is_attached(Attachment(DEFAULT_URL, "nb/new.ipynb"))
+
+
+def test_create_notebook_open_reports_a_tab_that_never_reaches_the_bridge(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    _creating(monkeypatch, server)
+    _rooms_returning(monkeypatch, server, {})
+    monkeypatch.setattr(server, "_TAB_ARRIVAL_TIMEOUT_S", 0)
+
+    async def scenario():
+        opener = await registry.attach("nb/a.ipynb")
+        opener.results["open_notebook"] = {"opened": True}
+        return await server.create_notebook("nb/new.ipynb", open=True)
+
+    message = asyncio.run(scenario())
+    assert "has not reached the bridge" in message
+    assert not registry.is_attached(Attachment(DEFAULT_URL, "nb/new.ipynb"))
+
+
+def test_create_notebook_open_keeps_the_file_when_the_tab_rejects_the_op(monkeypatch):
+    # An older extension without open_notebook must not turn a created file into a bare exception.
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    _creating(monkeypatch, server)
+
+    async def scenario():
+        opener = await registry.attach("nb/a.ipynb")
+        opener.fails_with = "the notebook tab's bridge extension does not support 'open_notebook'"
+        return await server.create_notebook("nb/new.ipynb", open=True)
+
+    message = asyncio.run(scenario())
+    assert "created nb/new.ipynb" in message
+    assert "does not support 'open_notebook'" in message
+    assert NEW_NOTEBOOK_URL in message
 
 
 def _clients_by_path(registry):
