@@ -293,6 +293,46 @@ def _with_registry(monkeypatch, open_notebooks, unreachable=(), tab_connected=Tr
     return server, registry
 
 
+def test_create_notebook_writes_to_the_default_server(monkeypatch):
+    # Creation targets where the next use_notebook would look, not whichever notebook is attached.
+    server, _ = _with_offset_default(monkeypatch)
+    created = []
+
+    async def create(jupyter_url, token, path, cells, kernel_name):
+        created.append((jupyter_url, token, path, cells, kernel_name))
+        return {"path": path}
+
+    monkeypatch.setattr(server.discovery, "create_notebook", create)
+    message = asyncio.run(server.create_notebook("nb/new.ipynb", cells=[{"cell_type": "code", "source": "1"}]))
+
+    assert created == [(OTHER_URL, OTHER_TOKEN, "nb/new.ipynb", [{"cell_type": "code", "source": "1"}], None)]
+    assert "created nb/new.ipynb" in message and "use_notebook" in message
+
+
+def test_create_notebook_reports_the_path_the_server_used(monkeypatch):
+    # Jupyter normalizes what it was given -- a leading slash is stripped -- so echoing the request
+    # back would name a path that does not exist as written.
+    server, _ = _with_registry(monkeypatch, {})
+
+    async def create(jupyter_url, token, path, cells, kernel_name):
+        return {"path": path.lstrip("/")}
+
+    monkeypatch.setattr(server.discovery, "create_notebook", create)
+    message = asyncio.run(server.create_notebook("/nb/new.ipynb"))
+    assert "created nb/new.ipynb" in message
+
+
+def test_create_notebook_surfaces_a_refusal(monkeypatch):
+    server, _ = _with_registry(monkeypatch, {})
+
+    async def create(jupyter_url, token, path, cells, kernel_name):
+        raise RuntimeError(f"{path} already exists; pick another name, or open the one that is there")
+
+    monkeypatch.setattr(server.discovery, "create_notebook", create)
+    with pytest.raises(RuntimeError, match="already exists"):
+        asyncio.run(server.create_notebook("nb/taken.ipynb"))
+
+
 def _clients_by_path(registry):
     return {attachment.path: registry.client_for(attachment) for attachment in registry.attachments()}
 
@@ -424,9 +464,17 @@ def test_detach_notebook_ambiguity_does_not_blame_servers_when_one_holds_both(mo
     assert len(registry.attachments()) == 2
 
 
-# Tools that pick or describe attachments rather than acting on one; everything else must accept a
-# notebook to act on. Derived by subtraction so a newly added tool has to opt out deliberately.
-ATTACHMENT_TOOLS = {"list_notebooks", "use_notebook", "use_server", "use_project", "detach_notebook", "poll_events"}
+# Tools that pick, describe, or create a notebook rather than acting on an attached one; everything
+# else must accept a notebook to act on. Derived by subtraction so a new tool opts out deliberately.
+ATTACHMENT_TOOLS = {
+    "list_notebooks",
+    "use_notebook",
+    "use_server",
+    "use_project",
+    "detach_notebook",
+    "poll_events",
+    "create_notebook",
+}
 
 
 def test_every_notebook_scoped_tool_accepts_a_target():
