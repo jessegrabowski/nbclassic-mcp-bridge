@@ -322,6 +322,39 @@ def test_create_notebook_reports_the_path_the_server_used(monkeypatch):
     assert "created nb/new.ipynb" in message
 
 
+def _rooms_returning(monkeypatch, server, *answers):
+    """Answer successive fetch_rooms calls from ``answers``, repeating the last one forever."""
+    calls = []
+
+    async def fake_rooms(jupyter_url, token):
+        calls.append(jupyter_url)
+        return answers[min(len(calls) - 1, len(answers) - 1)]
+
+    monkeypatch.setattr(server.discovery, "fetch_rooms", fake_rooms)
+    monkeypatch.setattr(server, "_ROOM_POLL_INTERVAL_S", 0)
+    return calls
+
+
+def test_attach_when_tab_arrives_waits_for_the_room_to_gain_an_extension(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {})
+    calls = _rooms_returning(monkeypatch, server, {}, {"nb/new.ipynb": ["mcp"]}, {"nb/new.ipynb": ["extension"]})
+
+    client = asyncio.run(server._attach_when_tab_arrives("nb/new.ipynb", timeout=5))
+
+    assert client is not None
+    # A room with only an mcp peer is a room nobody's browser is in; polling has to continue.
+    assert len(calls) == 3
+    assert [attachment.path for attachment in registry.attachments()] == ["nb/new.ipynb"]
+
+
+def test_attach_when_tab_arrives_gives_up_without_attaching(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {})
+    _rooms_returning(monkeypatch, server, {})
+
+    assert asyncio.run(server._attach_when_tab_arrives("nb/new.ipynb", timeout=0)) is None
+    assert registry.attachments() == []
+
+
 def test_create_notebook_surfaces_a_refusal(monkeypatch):
     server, _ = _with_registry(monkeypatch, {})
 

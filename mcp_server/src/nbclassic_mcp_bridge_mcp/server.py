@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import logging
@@ -27,6 +28,12 @@ _registry = NotebookRegistry(jupyter_url=_JUPYTER_URL, token=os.environ.get("JUP
 # it is the content worth reading.
 _OUTPUT_CHAR_LIMIT = 4096
 _SOURCE_CHAR_LIMIT = 16384
+
+# How long a newly opened tab has to reach the relay, and how often the rooms endpoint is checked
+# while waiting. A tab that takes longer is reported as not yet arrived rather than waited on: the
+# attachment is the only thing missing, and use_notebook completes it whenever the human is ready.
+_TAB_ARRIVAL_TIMEOUT_S = 15.0
+_ROOM_POLL_INTERVAL_S = 0.25
 
 
 class SeedCell(TypedDict):
@@ -321,6 +328,27 @@ async def use_project(path: str) -> str:
     jupyter_url, token = _derive_endpoint(path)
     _registry.retarget(jupyter_url, token)
     return f"new attachments will use {jupyter_url} (derived from {path})"
+
+
+async def _attach_when_tab_arrives(path: str, timeout: float) -> RelayClient | None:
+    """Attach to ``path`` once a browser tab for it joins the relay; return None if none arrives.
+
+    Parameters
+    ----------
+    path : str
+        Server-relative path of the notebook whose tab is expected.
+    timeout : float
+        Seconds to wait for the tab before giving up.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        rooms = await discovery.fetch_rooms(_registry.jupyter_url, _registry.token)
+        if "extension" in rooms.get(path, []):
+            return await _registry.attach(path)
+        if loop.time() >= deadline:
+            return None
+        await asyncio.sleep(_ROOM_POLL_INTERVAL_S)
 
 
 @mcp.tool()
