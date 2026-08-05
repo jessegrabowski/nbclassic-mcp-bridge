@@ -214,25 +214,26 @@ async def use_notebook(path: str | None = None) -> str:
 
 @mcp.tool()
 async def use_server(jupyter_url: str, token: str) -> str:
-    """Retarget the bridge at a different Jupyter server.
+    """Point new attachments at a different Jupyter server.
 
-    Drops any current attachment; follow with use_notebook to attach to a notebook on that server.
+    Notebooks already attached stay attached to the server they were attached against, so notebooks
+    on two servers can be held at once; follow with use_notebook to attach one here.
     """
-    await _registry.retarget(jupyter_url, token)
-    return f"relay target set to {jupyter_url}"
+    _registry.retarget(jupyter_url, token)
+    return f"new attachments will use {jupyter_url}"
 
 
 @mcp.tool()
 async def use_project(path: str) -> str:
-    """Retarget the bridge at the Jupyter server launched for a project directory.
+    """Point new attachments at the Jupyter server launched for a project directory.
 
     Supports the convention where a project-local server's token is the sha256 hex digest of the
-    project's resolved path. Drops any current attachment; follow with use_notebook to attach to a
-    notebook open on that server.
+    project's resolved path. Notebooks already attached stay attached to their own server; follow
+    with use_notebook to attach one here.
     """
     jupyter_url, token = _derive_endpoint(path)
-    await _registry.retarget(jupyter_url, token)
-    return f"relay target set to {jupyter_url} (derived from {path})"
+    _registry.retarget(jupyter_url, token)
+    return f"new attachments will use {jupyter_url} (derived from {path})"
 
 
 @mcp.tool()
