@@ -5,6 +5,10 @@ import pytest
 from nbclassic_mcp_bridge_mcp.sessions import NotebookRegistry
 
 
+# Attaching to this path fails, standing in for a stopped server or a rejected token.
+UNREACHABLE = "nb/unreachable.ipynb"
+
+
 class FakeClient:
     """Relay client double: records the endpoint it was built for and every connect and close."""
 
@@ -17,6 +21,8 @@ class FakeClient:
         self.events: list[dict] = []
 
     async def connect(self, path):
+        if path == UNREACHABLE:
+            raise ConnectionError("jupyter server refused the websocket")
         self.connects.append(path)
         self.notebook = path
 
@@ -68,6 +74,24 @@ def test_attaching_another_notebook_closes_the_previous_one():
     assert first.closes == 1
     assert second.closes == 0
     assert registry.current() is second
+
+
+def test_a_failed_attach_reports_that_nothing_is_attached():
+    # The previous notebook is dropped before the new one is dialed, so a connect failure must
+    # leave every later call saying "call use_notebook first" rather than raising KeyError on a
+    # client the registry no longer holds.
+    registry, created = build()
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        with pytest.raises(ConnectionError):
+            await registry.attach(UNREACHABLE)
+
+    asyncio.run(scenario())
+    assert created[0].closes == 1
+    assert registry.events_since(0) == ([], 0)
+    with pytest.raises(RuntimeError, match="use_notebook first"):
+        registry.current()
 
 
 def test_reattaching_the_same_notebook_reuses_its_client():

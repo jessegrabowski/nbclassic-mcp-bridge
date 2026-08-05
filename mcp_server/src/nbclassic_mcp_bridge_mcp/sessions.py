@@ -53,6 +53,10 @@ class NotebookRegistry:
         """
         key = (self._jupyter_url, path)
         for stale in [existing for existing in self._clients if existing != key]:
+            # Dropped before the new notebook is dialed, so a connect failure has to leave the
+            # registry saying nothing is attached rather than naming a client it no longer holds.
+            if stale == self._current:
+                self._current = None
             await self._clients.pop(stale).close()
         client = self._clients.get(key)
         if client is None:
