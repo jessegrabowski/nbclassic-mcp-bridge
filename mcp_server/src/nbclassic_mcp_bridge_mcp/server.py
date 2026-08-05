@@ -5,6 +5,7 @@ import os
 import sys
 from copy import deepcopy
 from pathlib import Path
+from typing import Literal, TypedDict
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -26,6 +27,13 @@ _registry = NotebookRegistry(jupyter_url=_JUPYTER_URL, token=os.environ.get("JUP
 # it is the content worth reading.
 _OUTPUT_CHAR_LIMIT = 4096
 _SOURCE_CHAR_LIMIT = 16384
+
+
+class SeedCell(TypedDict):
+    """One cell of a notebook being created, as ``create_notebook`` accepts it."""
+
+    cell_type: Literal["code", "markdown", "raw"]
+    source: str
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -313,6 +321,22 @@ async def use_project(path: str) -> str:
     jupyter_url, token = _derive_endpoint(path)
     _registry.retarget(jupyter_url, token)
     return f"new attachments will use {jupyter_url} (derived from {path})"
+
+
+@mcp.tool()
+async def create_notebook(path: str, cells: list[SeedCell] | None = None, kernel_name: str | None = None) -> str:
+    """Create a new notebook file on the Jupyter server, optionally seeded with cells.
+
+    Writes the file only -- no browser tab opens and the bridge does not attach, so follow up by
+    asking the human to open it and then calling use_notebook. ``path`` must end in .ipynb, is not
+    created if anything is already there, and its parent directories must already exist. ``cells``
+    are ``{cell_type, source}`` mappings in order; ``kernel_name`` records a kernel in the
+    notebook's metadata, and omitting it lets Jupyter pick its default. Default cells None,
+    kernel_name None.
+    """
+    record = await discovery.create_notebook(_registry.jupyter_url, _registry.token, path, cells, kernel_name)
+    created = record.get("path", path)
+    return f"created {created} on {_registry.jupyter_url}; open it in the classic UI, then call use_notebook to attach"
 
 
 @mcp.tool()

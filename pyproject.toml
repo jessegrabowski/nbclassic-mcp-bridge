@@ -42,6 +42,8 @@ pytest = "*"
 pytest-cov = "*"
 pytest-randomly = "*"
 playwright = "*"
+# Validates the notebook skeleton create_notebook builds, rather than trusting it by inspection.
+nbformat = "*"
 
 [tool.pixi.feature.test.tasks]
 unit = "pytest -m 'not e2e'"

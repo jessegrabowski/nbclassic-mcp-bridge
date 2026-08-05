@@ -1,11 +1,15 @@
 from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
 from urllib.parse import quote
+from uuid import uuid4
 
 import httpx
 
 
 _HTTP_TIMEOUT_S = 5
+
+NOTEBOOK_SUFFIX = ".ipynb"
+CELL_TYPES = ("code", "markdown", "raw")
 
 
 async def list_sessions(jupyter_url: str, token: str) -> list[dict]:
@@ -102,6 +106,78 @@ def match_notebook(requested: str, available: list[str]) -> tuple[str | None, li
     return None, sorted(matched)
 
 
+async def create_notebook(
+    jupyter_url: str, token: str, path: str, cells: list[dict] | None = None, kernel_name: str | None = None
+) -> dict:
+    """Create a notebook file at ``path`` and return the server's record of it.
+
+    Raise RuntimeError when ``path`` does not end in ``.ipynb``, when a cell names an unknown type,
+    or when something already occupies ``path`` -- the contents API would overwrite it without
+    complaint.
+
+    Parameters
+    ----------
+    jupyter_url : str
+        Base URL of the Jupyter server to create the file on.
+    token : str
+        Authentication token for that server.
+    path : str
+        Server-relative path of the notebook, including the ``.ipynb`` suffix. Parent directories
+        are not created.
+    cells : list of dict, optional
+        Seed cells as ``{cell_type, source}`` mappings, in order. Default None, an empty notebook.
+    kernel_name : str, optional
+        Kernel to record in the notebook's metadata. Default None, which leaves the notebook without
+        a kernelspec so Jupyter picks its default when the notebook is opened.
+    """
+    if not path.endswith(NOTEBOOK_SUFFIX):
+        # Jupyter types content by extension on every read, so a notebook saved under any other
+        # name comes back as a plain file: invisible to list_notebooks, unopenable as a notebook.
+        raise RuntimeError(f"a notebook path must end in {NOTEBOOK_SUFFIX}; got '{path}'")
+    if await _path_exists(jupyter_url, token, path):
+        raise RuntimeError(f"{path} already exists; pick another name, or open the one that is there")
+    document = _notebook_document(cells or [], kernel_name)
+    payload = {"type": "notebook", "format": "json", "content": document}
+    return await _request_json("PUT", jupyter_url, f"api/contents/{quote(path)}", token, payload=payload)
+
+
+def _notebook_document(cells: list[dict], kernel_name: str | None) -> dict:
+    """Build an empty nbformat 4.5 notebook holding ``cells``."""
+    metadata = {"kernelspec": {"name": kernel_name, "display_name": kernel_name}} if kernel_name else {}
+    return {
+        "cells": [_notebook_cell(cell) for cell in cells],
+        "metadata": metadata,
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+
+
+def _notebook_cell(cell: dict) -> dict:
+    """Expand a ``{cell_type, source}`` mapping into an nbformat cell with a fresh id.
+
+    Raise RuntimeError on an unknown cell type: Jupyter captures the resulting validation failure
+    into its reply instead of refusing the write, so an unchecked typo lands as a broken notebook.
+    """
+    cell_type = cell.get("cell_type", "code")
+    if cell_type not in CELL_TYPES:
+        raise RuntimeError(f"cell_type must be one of {', '.join(CELL_TYPES)}; got '{cell_type}'")
+    built = {"cell_type": cell_type, "id": uuid4().hex[:8], "metadata": {}, "source": cell.get("source", "")}
+    if cell_type == "code":
+        built["execution_count"] = None
+        built["outputs"] = []
+    return built
+
+
+async def _path_exists(jupyter_url: str, token: str, path: str) -> bool:
+    """Report whether the Jupyter server already has something at ``path``."""
+    try:
+        await _get_json(jupyter_url, f"api/contents/{quote(path)}", token)
+    except httpx.HTTPStatusError:
+        # Only a 404 arrives here; _request_json turns every other status into a RuntimeError.
+        return False
+    return True
+
+
 async def create_checkpoint(jupyter_url: str, token: str, path: str) -> dict:
     """Create a Jupyter checkpoint of ``path``'s saved file; return the checkpoint record.
 
@@ -131,12 +207,12 @@ async def _post_json(jupyter_url: str, endpoint: str, token: str):
     return await _request_json("POST", jupyter_url, endpoint, token)
 
 
-async def _request_json(method: str, jupyter_url: str, endpoint: str, token: str):
+async def _request_json(method: str, jupyter_url: str, endpoint: str, token: str, payload: dict | None = None):
     url = f"{jupyter_url.rstrip('/')}/{endpoint}"
     headers = {"Authorization": f"token {token}"} if token else {}
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client:
-            response = await client.request(method, url, headers=headers)
+            response = await client.request(method, url, headers=headers, json=payload)
             response.raise_for_status()
             return response.json() if response.content else None
     except httpx.HTTPStatusError as exc:

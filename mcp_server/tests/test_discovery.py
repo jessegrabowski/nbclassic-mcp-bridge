@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from nbclassic_mcp_bridge_mcp.discovery import (
     best_matches,
     create_checkpoint,
+    create_notebook,
     fetch_rooms,
     list_sessions,
     match_notebook,
@@ -20,6 +22,112 @@ def _route_discovery_http(monkeypatch, handler):
     monkeypatch.setattr(
         httpx, "AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs)
     )
+
+
+def _creating_server(monkeypatch, existing=()):
+    """Route creation traffic to a fake contents API; return the requests it received."""
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        path = request.url.path.removeprefix("/api/contents/")
+        if request.method == "GET":
+            if path in existing:
+                return httpx.Response(200, json={"path": path, "type": "notebook"})
+            return httpx.Response(404, json={"message": "no such file"})
+        return httpx.Response(201, json={"path": path, "type": "notebook"})
+
+    _route_discovery_http(monkeypatch, handler)
+    return seen
+
+
+def _written_document(requests):
+    return json.loads(requests[-1].content)["content"]
+
+
+def test_create_notebook_writes_a_valid_empty_notebook(monkeypatch):
+    import nbformat
+
+    requests = _creating_server(monkeypatch)
+    asyncio.run(create_notebook("http://localhost:8888", "tok", "nb/new.ipynb"))
+
+    assert [request.method for request in requests] == ["GET", "PUT"]
+    document = _written_document(requests)
+    nbformat.validate(nbformat.from_dict(document))
+    assert (document["nbformat"], document["nbformat_minor"]) == (4, 5)
+    assert document["cells"] == []
+
+
+def test_create_notebook_expands_seed_cells(monkeypatch):
+    import nbformat
+
+    requests = _creating_server(monkeypatch)
+    cells = [{"cell_type": "markdown", "source": "# Title"}, {"cell_type": "code", "source": "import pandas"}]
+    asyncio.run(create_notebook("http://localhost:8888", "tok", "nb/new.ipynb", cells=cells))
+
+    document = _written_document(requests)
+    nbformat.validate(nbformat.from_dict(document))
+    markdown, code = document["cells"]
+    assert (markdown["cell_type"], markdown["source"]) == ("markdown", "# Title")
+    assert "outputs" not in markdown  # a markdown cell carrying outputs fails nbformat validation
+    assert (code["execution_count"], code["outputs"]) == (None, [])
+    assert markdown["id"] != code["id"]
+
+
+def test_create_notebook_records_the_kernel_when_asked(monkeypatch):
+    import nbformat
+
+    requests = _creating_server(monkeypatch)
+    asyncio.run(create_notebook("http://localhost:8888", "tok", "nb/new.ipynb", kernel_name="python3"))
+
+    document = _written_document(requests)
+    nbformat.validate(nbformat.from_dict(document))
+    assert document["metadata"]["kernelspec"]["name"] == "python3"
+
+
+def test_create_notebook_leaves_the_kernel_to_jupyter_by_default(monkeypatch):
+    requests = _creating_server(monkeypatch)
+    asyncio.run(create_notebook("http://localhost:8888", "tok", "nb/new.ipynb"))
+    assert "kernelspec" not in _written_document(requests)["metadata"]
+
+
+def test_create_notebook_refuses_a_path_that_is_not_a_notebook(monkeypatch):
+    # Jupyter types content by extension on read, so a notebook under any other name comes back a
+    # plain file: invisible to list_notebooks and unopenable as a notebook.
+    requests = _creating_server(monkeypatch)
+    with pytest.raises(RuntimeError, match=r"must end in \.ipynb"):
+        asyncio.run(create_notebook("http://localhost:8888", "tok", "nb/analysis"))
+    assert requests == []
+
+
+def test_create_notebook_refuses_an_unknown_cell_type(monkeypatch):
+    # Jupyter captures the resulting validation failure into its reply rather than refusing the
+    # write, so an unchecked typo would land as a broken notebook reported as created.
+    requests = _creating_server(monkeypatch)
+    with pytest.raises(RuntimeError, match="cell_type must be one of"):
+        asyncio.run(
+            create_notebook("http://localhost:8888", "tok", "nb/new.ipynb", cells=[{"cell_type": "Code", "source": ""}])
+        )
+    assert [request.method for request in requests] == ["GET"]
+
+
+def test_create_notebook_refuses_an_existing_path(monkeypatch):
+    requests = _creating_server(monkeypatch, existing={"nb/taken.ipynb"})
+    with pytest.raises(RuntimeError, match="already exists"):
+        asyncio.run(create_notebook("http://localhost:8888", "tok", "nb/taken.ipynb"))
+    assert [request.method for request in requests] == ["GET"]
+
+
+def test_create_notebook_keeps_the_token_out_of_its_errors(monkeypatch):
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(404, json={"message": "no such file"})
+        return httpx.Response(403, json={"message": "forbidden"})
+
+    _route_discovery_http(monkeypatch, handler)
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(create_notebook("http://localhost:8888", "SECRET-TOKEN", "nb/new.ipynb"))
+    assert "SECRET-TOKEN" not in str(exc_info.value)
 
 
 OPEN_PATHS = ["notebooks/demo.ipynb", "notebooks/scratch.ipynb", "Untitled.ipynb"]
