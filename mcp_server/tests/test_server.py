@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import inspect
 
 import pytest
 
@@ -165,6 +166,7 @@ def _record(path, tab=True):
 
 
 DEFAULT_URL = "http://a:8888"
+TOKEN = "tok-a"
 OTHER_URL = "http://b:9999"
 OTHER_TOKEN = "tok-b"
 
@@ -244,12 +246,17 @@ class FakeRelayClient:
         self.jupyter_url = jupyter_url
         self.token = token
         self.notebook = None
+        self.commands: list[tuple[str, dict]] = []
 
     async def connect(self, path):
         self.notebook = path
 
     async def close(self):
         pass
+
+    async def command(self, op, args):
+        self.commands.append((op, args))
+        return {}
 
     async def extension_present(self, timeout=0.5):
         return self.tab_connected
@@ -268,7 +275,7 @@ def _with_registry(monkeypatch, open_notebooks, unreachable=(), tab_connected=Tr
         client.tab_connected = tab_connected
         return client
 
-    registry = NotebookRegistry(DEFAULT_URL, "tok-a", client_factory=factory)
+    registry = NotebookRegistry(DEFAULT_URL, TOKEN, client_factory=factory)
     monkeypatch.setattr(server, "_registry", registry)
 
     async def fake_open(jupyter_url, token):
@@ -289,7 +296,7 @@ def test_list_notebooks_survives_an_unreachable_server(monkeypatch):
     async def scenario():
         registry.retarget(OTHER_URL, OTHER_TOKEN)
         await registry.attach("nb/a.ipynb")
-        registry.retarget(DEFAULT_URL, "tok-a")
+        registry.retarget(DEFAULT_URL, TOKEN)
         return await server.list_notebooks()
 
     records = asyncio.run(scenario())
@@ -370,7 +377,7 @@ def test_detach_notebook_rejects_an_unattached_path(monkeypatch):
         asyncio.run(server.detach_notebook("nb/zzz.ipynb"))
 
 
-def test_detach_notebook_asks_which_server_when_a_path_is_attached_twice(monkeypatch):
+def test_detach_notebook_asks_for_a_narrower_name_when_several_match(monkeypatch):
     # Ambiguity is guidance, not failure -- the same answer use_notebook gives when several
     # notebooks match, so the assistant's next move is a better call rather than a recovery.
     server, registry = _with_registry(
@@ -384,49 +391,242 @@ def test_detach_notebook_asks_which_server_when_a_path_is_attached_twice(monkeyp
         return await server.detach_notebook("nb/a.ipynb")
 
     message = asyncio.run(scenario())
-    assert "attached on several servers" in message
+    assert "matches several attached notebooks" in message
     assert DEFAULT_URL in message and OTHER_URL in message
     assert len(registry.attachments()) == 2
 
 
-class StubClient:
-    """Attached-notebook double carrying its own endpoint, which need not be the registry default."""
+def test_detach_notebook_ambiguity_does_not_blame_servers_when_one_holds_both(monkeypatch):
+    # A loose name can tie two notebooks on a single server; the reply must not send the assistant
+    # to use_server, which cannot separate them.
+    server, registry = _with_registry(
+        monkeypatch, {DEFAULT_URL: [_record("chapter1/report.ipynb"), _record("chapter2/report.ipynb")]}
+    )
 
-    def __init__(self, notebook="nb/a.ipynb"):
-        self.notebook = notebook
-        self.jupyter_url = "http://other:9999"
-        self.token = "tok-other"
-        self.commands: list[tuple[str, dict]] = []
+    async def scenario():
+        await registry.attach("chapter1/report.ipynb")
+        await registry.attach("chapter2/report.ipynb")
+        return await server.detach_notebook("report")
 
-    async def command(self, op, args):
-        self.commands.append((op, args))
-        return {}
-
-
-class StubEndpointRegistry:
-    """Registry double whose default endpoint differs from its attached notebook's."""
-
-    def __init__(self, client):
-        self.jupyter_url = "http://localhost:8888"
-        self.token = "tok-default"
-        self._client = client
-
-    def current(self):
-        return self._client
+    message = asyncio.run(scenario())
+    assert "matches several attached notebooks" in message
+    assert "use_server" not in message
+    assert len(registry.attachments()) == 2
 
 
-def _with_client(monkeypatch):
+# Tools that pick or describe attachments rather than acting on one; everything else must accept a
+# notebook to act on. Derived by subtraction so a newly added tool has to opt out deliberately.
+ATTACHMENT_TOOLS = {"list_notebooks", "use_notebook", "use_server", "use_project", "detach_notebook", "poll_events"}
+
+
+def test_every_notebook_scoped_tool_accepts_a_target():
     import nbclassic_mcp_bridge_mcp.server as server
 
-    client = StubClient()
-    monkeypatch.setattr(server, "_registry", StubEndpointRegistry(client))
-    return server, client
+    registered = asyncio.run(server.mcp.list_tools())
+    missing = sorted(
+        tool.name
+        for tool in registered
+        if tool.name not in ATTACHMENT_TOOLS
+        and "notebook" not in inspect.signature(getattr(server, tool.name)).parameters
+    )
+    assert missing == []
+
+
+# Tools whose result must name the notebook it acted on, and a call that exercises each.
+ECHOING_TOOLS = [
+    ("insert_cell", {"index": 0, "cell_type": "code", "source": "x"}),
+    ("set_cell_source", {"cell_id": "c1", "source": "x"}),
+    ("delete_cell", {"cell_id": "c1"}),
+    ("move_cell", {"cell_id": "c1", "index": 1}),
+    ("execute_cell", {"cell_id": "c1"}),
+    ("run_cells", {"cell_ids": ["c1"]}),
+    ("undo_last_change", {}),
+    ("undo_all_changes", {}),
+]
+
+
+@pytest.mark.parametrize("tool_name, kwargs", ECHOING_TOOLS, ids=[name for name, _ in ECHOING_TOOLS])
+def test_a_mutating_tool_acts_on_the_named_notebook(monkeypatch, tool_name, kwargs):
+    # Two halves of one contract: the result says which notebook was changed, so the assistant is
+    # told rather than having to remember, and the named notebook becomes the current one.
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        return await getattr(server, tool_name)(**kwargs, notebook="nb/a.ipynb")
+
+    assert asyncio.run(scenario())["notebook"] == "nb/a.ipynb"
+    assert registry.is_current(Attachment(DEFAULT_URL, "nb/a.ipynb"))
+
+
+READING_TOOLS = [
+    ("read_notebook", {}),
+    ("read_cell_source", {"cell_id": "c1"}),
+    ("read_cell_output", {"cell_id": "c1"}),
+    ("inspect_kernel", {"code": "x"}),
+    ("kernel_status", {}),
+]
+
+
+@pytest.mark.parametrize("tool_name, kwargs", READING_TOOLS, ids=[name for name, _ in READING_TOOLS])
+def test_reading_another_notebook_does_not_retarget(monkeypatch, tool_name, kwargs):
+    # Peeking at a second notebook must not silently redirect the next mutation -- only changing or
+    # executing one says the assistant is working there.
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        await getattr(server, tool_name)(**kwargs, notebook="nb/a.ipynb")
+
+    asyncio.run(scenario())
+    assert registry.is_current(Attachment(DEFAULT_URL, "nb/b.ipynb"))
+
+
+# Notebook-scoped tools whose targeting no other test proves. A tool can accept ``notebook`` and
+# quietly ignore it, which the signature check above cannot see, so assert the command actually
+# reaches the named notebook's client. read_cell_image dispatches and then rejects the imageless
+# stub reply; the dispatch is what is under test.
+DISPATCHING_TOOLS = [
+    ("read_cell_image", {"cell_id": "c1"}, RuntimeError),
+    ("interrupt_kernel", {}, None),
+]
+
+
+@pytest.mark.parametrize(
+    "tool_name, kwargs, expected_error", DISPATCHING_TOOLS, ids=[name for name, _, _ in DISPATCHING_TOOLS]
+)
+def test_a_tool_dispatches_to_the_named_notebook(monkeypatch, tool_name, kwargs, expected_error):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        await getattr(server, tool_name)(**kwargs, notebook="nb/a.ipynb")
+
+    if expected_error is None:
+        asyncio.run(scenario())
+    else:
+        with pytest.raises(expected_error):
+            asyncio.run(scenario())
+
+    by_path = {attachment.path: registry.client_for(attachment) for attachment in registry.attachments()}
+    assert by_path["nb/a.ipynb"].commands != []
+    assert by_path["nb/b.ipynb"].commands == []
+
+
+def test_checkpoint_targets_the_named_notebook(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+    checkpointed = []
+
+    async def create(url, token, path):
+        checkpointed.append(path)
+        return {"id": "cp1"}
+
+    monkeypatch.setattr(server.discovery, "create_checkpoint", create)
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        return await server.checkpoint_notebook(notebook="nb/a.ipynb")
+
+    assert asyncio.run(scenario())["notebook"] == "nb/a.ipynb"
+    assert checkpointed == ["nb/a.ipynb"]
+
+
+def test_restore_targets_the_named_notebook(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+    restored = []
+
+    async def list_checkpoints(url, token, path):
+        return [{"id": "cp1"}]
+
+    async def restore(url, token, path, checkpoint_id):
+        restored.append(path)
+
+    monkeypatch.setattr(server.discovery, "list_checkpoints", list_checkpoints)
+    monkeypatch.setattr(server.discovery, "restore_checkpoint", restore)
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        return await server.restore_notebook_checkpoint(notebook="nb/a.ipynb")
+
+    message = asyncio.run(scenario())
+    assert restored == ["nb/a.ipynb"]
+    assert "restored nb/a.ipynb" in message
+    by_path = {attachment.path: registry.client_for(attachment) for attachment in registry.attachments()}
+    assert by_path["nb/a.ipynb"].commands == [("reload_notebook", {})]
+    assert by_path["nb/b.ipynb"].commands == []
+
+
+def test_kernel_status_names_the_notebook_it_describes(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        return await server.kernel_status()
+
+    assert asyncio.run(scenario())["notebook"] == "nb/a.ipynb"
+
+
+def test_a_tool_targets_a_notebook_by_a_loose_name(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("notebooks/2026/analysis.ipynb")]})
+
+    async def scenario():
+        await registry.attach("notebooks/2026/analysis.ipynb")
+        return await server.delete_cell("c1", notebook="analysis")
+
+    assert asyncio.run(scenario())["notebook"] == "notebooks/2026/analysis.ipynb"
+
+
+def test_a_tool_refuses_an_unattached_notebook(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    asyncio.run(registry.attach("nb/a.ipynb"))
+    with pytest.raises(RuntimeError, match="is not attached"):
+        asyncio.run(server.delete_cell("c1", notebook="nb/zzz.ipynb"))
+
+
+def test_a_tool_refuses_an_ambiguous_notebook_rather_than_guessing(monkeypatch):
+    # A mutation must never land on a coin flip, so ambiguity raises here even though the picker
+    # tools answer the same condition with guidance.
+    server, registry = _with_registry(
+        monkeypatch, {DEFAULT_URL: [_record("a/report.ipynb"), _record("b/report.ipynb")]}
+    )
+
+    async def scenario():
+        await registry.attach("a/report.ipynb")
+        await registry.attach("b/report.ipynb")
+        await server.delete_cell("c1", notebook="report.ipynb")
+
+    with pytest.raises(RuntimeError, match="matches several attached notebooks"):
+        asyncio.run(scenario())
+
+
+def test_omitting_the_notebook_targets_the_current_one(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        return await server.delete_cell("c1")
+
+    assert asyncio.run(scenario())["notebook"] == "nb/b.ipynb"
+
+
+def _with_offset_default(monkeypatch):
+    """Attach on one server, then aim the default at another, so the two genuinely differ."""
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    asyncio.run(registry.attach("nb/a.ipynb"))
+    registry.retarget(OTHER_URL, OTHER_TOKEN)
+    return server, registry
 
 
 def test_checkpoint_uses_the_attached_notebooks_own_endpoint(monkeypatch):
     # A notebook stays attached to the server it was attached against, so checkpointing has to
     # talk to that server rather than wherever the registry currently points.
-    server, _ = _with_client(monkeypatch)
+    server, _ = _with_offset_default(monkeypatch)
     calls = []
 
     async def create(url, token, path):
@@ -434,12 +634,12 @@ def test_checkpoint_uses_the_attached_notebooks_own_endpoint(monkeypatch):
         return {"id": "cp1"}
 
     monkeypatch.setattr(server.discovery, "create_checkpoint", create)
-    assert asyncio.run(server.checkpoint_notebook()) == {"id": "cp1"}
-    assert calls == [("http://other:9999", "tok-other", "nb/a.ipynb")]
+    assert asyncio.run(server.checkpoint_notebook()) == {"id": "cp1", "notebook": "nb/a.ipynb"}
+    assert calls == [(DEFAULT_URL, TOKEN, "nb/a.ipynb")]
 
 
 def test_restore_uses_the_attached_notebooks_own_endpoint(monkeypatch):
-    server, client = _with_client(monkeypatch)
+    server, registry = _with_offset_default(monkeypatch)
     seen = []
 
     async def list_checkpoints(url, token, path):
@@ -453,10 +653,10 @@ def test_restore_uses_the_attached_notebooks_own_endpoint(monkeypatch):
     monkeypatch.setattr(server.discovery, "restore_checkpoint", restore)
     message = asyncio.run(server.restore_notebook_checkpoint())
     assert seen == [
-        ("list", "http://other:9999", "tok-other", "nb/a.ipynb"),
-        ("restore", "http://other:9999", "tok-other", "nb/a.ipynb"),
+        ("list", DEFAULT_URL, TOKEN, "nb/a.ipynb"),
+        ("restore", DEFAULT_URL, TOKEN, "nb/a.ipynb"),
     ]
-    assert client.commands == [("reload_notebook", {})]
+    assert registry.current().commands == [("reload_notebook", {})]
     assert "restored nb/a.ipynb to checkpoint cp1" in message
 
 
@@ -467,7 +667,7 @@ def test_checkpoint_without_an_attachment_points_at_use_notebook(monkeypatch):
 
 
 def test_restore_without_a_checkpoint_gives_an_actionable_error(monkeypatch):
-    server, _ = _with_client(monkeypatch)
+    server, _ = _with_offset_default(monkeypatch)
 
     async def no_checkpoints(url, token, path):
         return []
