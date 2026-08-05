@@ -8,7 +8,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 
 from nbclassic_mcp_bridge_mcp import discovery
-from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
+from nbclassic_mcp_bridge_mcp.sessions import NotebookRegistry
 
 
 log = logging.getLogger(__name__)
@@ -17,7 +17,7 @@ mcp = FastMCP("nbclassic-mcp-bridge")
 
 # Configured like the upstream jupyter-mcp-server: a Jupyter URL + token.
 _JUPYTER_URL = os.environ.get("JUPYTER_URL", "http://localhost:8888")
-_relay = RelayClient(jupyter_url=_JUPYTER_URL, token=os.environ.get("JUPYTER_TOKEN", ""))
+_registry = NotebookRegistry(jupyter_url=_JUPYTER_URL, token=os.environ.get("JUPYTER_TOKEN", ""))
 
 # Longest text kept verbatim, per output payload and per cell source. Anything longer is truncated so
 # one runaway cell or output cannot blow the response budget; source gets the larger allowance because
@@ -158,8 +158,8 @@ def _derive_endpoint(project_path: str) -> tuple[str, str]:
 
 async def _open_notebooks() -> list[dict]:
     """Fetch the merged discovery view for the relay's current Jupyter server."""
-    sessions = await discovery.list_sessions(_relay.jupyter_url, _relay.token)
-    rooms = await discovery.fetch_rooms(_relay.jupyter_url, _relay.token)
+    sessions = await discovery.list_sessions(_registry.jupyter_url, _registry.token)
+    rooms = await discovery.fetch_rooms(_registry.jupyter_url, _registry.token)
     return discovery.merge_notebook_view(sessions, rooms)
 
 
@@ -188,7 +188,7 @@ async def use_notebook(path: str | None = None) -> str:
     if path is None:
         candidates = [n for n in notebooks if n["browser_tab_connected"]] or notebooks
         if not candidates:
-            return f"no notebooks are open on {_relay.jupyter_url}; open one in the classic UI first"
+            return f"no notebooks are open on {_registry.jupyter_url}; open one in the classic UI first"
         if len(candidates) > 1:
             listing = ", ".join(n["path"] for n in candidates)
             return f"several notebooks are open ({listing}); call use_notebook with one of these paths"
@@ -202,8 +202,8 @@ async def use_notebook(path: str | None = None) -> str:
             path = match
         # No match at all still attaches verbatim: the room outlives this call, so opening the
         # notebook afterwards completes the attachment.
-    await _relay.connect(path)
-    if await _relay.extension_present():
+    session = await _registry.attach(path)
+    if await session.extension_present():
         return f"attached to {path}{note} (browser tab connected)"
     open_listing = ", ".join(n["path"] for n in notebooks) or "none"
     return (
@@ -218,7 +218,7 @@ async def use_server(jupyter_url: str, token: str) -> str:
 
     Drops any current attachment; follow with use_notebook to attach to a notebook on that server.
     """
-    await _relay.retarget(jupyter_url, token)
+    await _registry.retarget(jupyter_url, token)
     return f"relay target set to {jupyter_url}"
 
 
@@ -231,7 +231,7 @@ async def use_project(path: str) -> str:
     notebook open on that server.
     """
     jupyter_url, token = _derive_endpoint(path)
-    await _relay.retarget(jupyter_url, token)
+    await _registry.retarget(jupyter_url, token)
     return f"relay target set to {jupyter_url} (derived from {path})"
 
 
@@ -242,7 +242,7 @@ async def read_notebook() -> list[dict]:
     Source longer than ~16k chars is truncated; outputs are summarized, not included -- call
     ``read_cell_source`` / ``read_cell_output`` for one cell.
     """
-    cells = await _relay.command("snapshot", {"outputs": "summary"})
+    cells = await _registry.current().command("snapshot", {"outputs": "summary"})
     return [_outline_cell(c) for c in cells]
 
 
@@ -252,7 +252,7 @@ async def read_cell_source(cell_id: str, full: bool = False) -> dict:
 
     Source longer than ~16k chars is truncated unless ``full`` is true.
     """
-    return _cell_source_view(await _relay.command("read_cell", {"cell_id": cell_id}), full)
+    return _cell_source_view(await _registry.current().command("read_cell", {"cell_id": cell_id}), full)
 
 
 @mcp.tool()
@@ -262,7 +262,7 @@ async def read_cell_output(cell_id: str, full: bool = False) -> dict:
     Long text in each output is truncated unless ``full`` is true. Image payloads are stubbed out
     (unless ALLOW_IMG_OUTPUT is set); to look at one, call ``read_cell_image``.
     """
-    return _cell_output_view(await _relay.command("read_cell", {"cell_id": cell_id}), full)
+    return _cell_output_view(await _registry.current().command("read_cell", {"cell_id": cell_id}), full)
 
 
 @mcp.tool()
@@ -273,7 +273,7 @@ async def read_cell_image(cell_id: str, image_index: int = 0) -> Image:
     (the first). Use this to actually look at a plot -- image payloads are stubbed out of every
     text-returning tool.
     """
-    cell = await _relay.command("read_cell", {"cell_id": cell_id})
+    cell = await _registry.current().command("read_cell", {"cell_id": cell_id})
     images = _extract_images(cell)
     if not images:
         raise RuntimeError(f"cell {cell_id} has no raster image outputs")
@@ -288,7 +288,7 @@ async def read_cell_image(cell_id: str, image_index: int = 0) -> Image:
 @mcp.tool()
 async def insert_cell(index: int, cell_type: str, source: str) -> dict:
     """Insert a new cell at ``index``."""
-    return await _relay.command("insert_cell", {"index": index, "cell_type": cell_type, "source": source})
+    return await _registry.current().command("insert_cell", {"index": index, "cell_type": cell_type, "source": source})
 
 
 @mcp.tool()
@@ -300,7 +300,7 @@ async def set_cell_source(cell_id: str, source: str) -> dict:
     returns ``{"cell_id": ..., "status": "skipped", "reason": "focused"}``, so check ``status``
     before assuming the write took effect.
     """
-    return await _relay.command("set_source", {"cell_id": cell_id, "source": source})
+    return await _registry.current().command("set_source", {"cell_id": cell_id, "source": source})
 
 
 @mcp.tool()
@@ -311,7 +311,7 @@ async def execute_cell(cell_id: str, timeout_s: float = 120) -> dict:
     keeps running). Default 120.
     """
     args = {"cell_id": cell_id, "timeout_ms": int(timeout_s * 1000)}
-    return _cell_output_view(await _relay.command("execute_cell", args), full=False)
+    return _cell_output_view(await _registry.current().command("execute_cell", args), full=False)
 
 
 @mcp.tool()
@@ -322,7 +322,7 @@ async def run_cells(cell_ids: list[str], timeout_s: float = 600) -> dict:
     ones after it. On timeout, finished cells keep their outputs and unfinished ones are marked
     "timed out" (they keep running in the kernel). Long text is truncated. Default timeout 600.
     """
-    result = await _relay.command("run_cells", {"cell_ids": cell_ids, "timeout_ms": int(timeout_s * 1000)})
+    result = await _registry.current().command("run_cells", {"cell_ids": cell_ids, "timeout_ms": int(timeout_s * 1000)})
     for cell_result in result.get("results", []):
         for output in cell_result.get("outputs", []):
             _clean_output(output)
@@ -338,7 +338,7 @@ async def inspect_kernel(code: str, timeout_s: float = 30, full: bool = False) -
     human should see. Returns ``{status, outputs}``; long text is truncated unless ``full`` is
     true. Default timeout 30.
     """
-    result = await _relay.command("inspect", {"code": code, "timeout_ms": int(timeout_s * 1000)})
+    result = await _registry.current().command("inspect", {"code": code, "timeout_ms": int(timeout_s * 1000)})
     for output in result.get("outputs", []):
         _clean_output(output, truncate=not full)
     return result
@@ -351,7 +351,7 @@ async def interrupt_kernel() -> dict:
     Stops whatever is currently running -- including a cell the human started -- so use it to stop
     a runaway execution you triggered.
     """
-    return await _relay.command("interrupt_kernel", {})
+    return await _registry.current().command("interrupt_kernel", {})
 
 
 @mcp.tool()
@@ -361,19 +361,19 @@ async def kernel_status() -> dict:
     ``execute_cell`` and ``inspect_kernel`` fail immediately with "kernel is not connected" while
     the kernel is dead or restarting; poll here (or watch kernel_status events) before retrying.
     """
-    return await _relay.command("kernel_info", {})
+    return await _registry.current().command("kernel_info", {})
 
 
 @mcp.tool()
 async def delete_cell(cell_id: str) -> dict:
     """Delete a cell by id."""
-    return await _relay.command("delete_cell", {"cell_id": cell_id})
+    return await _registry.current().command("delete_cell", {"cell_id": cell_id})
 
 
 @mcp.tool()
 async def move_cell(cell_id: str, index: int) -> dict:
     """Move a cell to a new index in the notebook."""
-    return await _relay.command("move_cell", {"cell_id": cell_id, "index": index})
+    return await _registry.current().command("move_cell", {"cell_id": cell_id, "index": index})
 
 
 @mcp.tool()
@@ -384,7 +384,7 @@ async def undo_last_change() -> dict:
     never destroy human work; skipped or not, the entry is consumed. Returns what was undone or why
     it was skipped.
     """
-    return await _relay.command("undo_last", {})
+    return await _registry.current().command("undo_last", {})
 
 
 @mcp.tool()
@@ -394,7 +394,7 @@ async def undo_all_changes() -> dict:
     Entries the human has since touched are skipped, not applied (and consumed either way);
     executions are not undoable.
     """
-    return await _relay.command("undo_all", {})
+    return await _registry.current().command("undo_all", {})
 
 
 @mcp.tool()
@@ -404,9 +404,8 @@ async def checkpoint_notebook() -> dict:
     Uses Jupyter's single default checkpoint slot -- the same one the human's "Save and
     Checkpoint" writes -- so create one deliberately, not routinely.
     """
-    if _relay.notebook is None:
-        raise RuntimeError("not attached -- call use_notebook first")
-    return await discovery.create_checkpoint(_relay.jupyter_url, _relay.token, _relay.notebook)
+    session = _registry.current()
+    return await discovery.create_checkpoint(_registry.jupyter_url, _registry.token, session.notebook)
 
 
 @mcp.tool()
@@ -416,14 +415,14 @@ async def restore_notebook_checkpoint() -> str:
     DESTRUCTIVE: the file on disk reverts to the checkpoint and the browser tab reloads from disk,
     discarding any unsaved edits (the human's included). Confirm with the human first.
     """
-    if _relay.notebook is None:
-        raise RuntimeError("not attached -- call use_notebook first")
-    checkpoints = await discovery.list_checkpoints(_relay.jupyter_url, _relay.token, _relay.notebook)
+    session = _registry.current()
+    url, token, path = _registry.jupyter_url, _registry.token, session.notebook
+    checkpoints = await discovery.list_checkpoints(url, token, path)
     if not checkpoints:
-        raise RuntimeError(f"no checkpoint exists for {_relay.notebook}; call checkpoint_notebook first")
-    await discovery.restore_checkpoint(_relay.jupyter_url, _relay.token, _relay.notebook, checkpoints[0]["id"])
-    await _relay.command("reload_notebook", {})
-    return f"restored {_relay.notebook} to checkpoint {checkpoints[0]['id']} and reloaded the browser tab"
+        raise RuntimeError(f"no checkpoint exists for {path}; call checkpoint_notebook first")
+    await discovery.restore_checkpoint(url, token, path, checkpoints[0]["id"])
+    await session.command("reload_notebook", {})
+    return f"restored {path} to checkpoint {checkpoints[0]['id']} and reloaded the browser tab"
 
 
 @mcp.tool()
@@ -439,7 +438,7 @@ async def poll_events(cursor: int = 0) -> dict:
     fails with "bridge paused by the user" until a bridge_resumed event arrives. Image payloads
     are omitted from cell_executed outputs; use ``read_cell_image`` to view them.
     """
-    events, new_cursor = _relay.events_since(cursor)
+    events, new_cursor = _registry.events_since(cursor)
     return _clean_event_outputs({"events": events, "cursor": new_cursor})
 
 

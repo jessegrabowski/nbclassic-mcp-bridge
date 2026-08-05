@@ -159,17 +159,25 @@ def test_cell_output_view_full_skips_text_truncation():
     assert _cell_output_view(fresh_cell(), full=True)["outputs"][0]["text"] == "z" * 10000
 
 
-class StubRelay:
-    """Relay double for tool-level tests: records connects, scripts tab presence."""
+class StubRegistry:
+    """Registry double for tool-level tests: records attachments, scripts tab presence."""
 
     def __init__(self, tab_connected=True):
         self.jupyter_url = "http://localhost:8888"
         self.token = "tok"
         self.connected_to = None
+        self.notebook = None
         self._tab_connected = tab_connected
 
-    async def connect(self, path):
+    async def attach(self, path):
         self.connected_to = path
+        self.notebook = path
+        return self
+
+    def current(self):
+        if self.notebook is None:
+            raise RuntimeError("not attached -- call use_notebook first")
+        return self
 
     async def extension_present(self, timeout=0.5):
         return self._tab_connected
@@ -178,8 +186,8 @@ class StubRelay:
 def _run_use_notebook(monkeypatch, notebooks, path=None, tab_connected=True):
     import nbclassic_mcp_bridge_mcp.server as server
 
-    stub = StubRelay(tab_connected)
-    monkeypatch.setattr(server, "_relay", stub)
+    stub = StubRegistry(tab_connected)
+    monkeypatch.setattr(server, "_registry", stub)
 
     async def fake_open_notebooks():
         return notebooks
@@ -234,9 +242,9 @@ def test_use_notebook_attaches_verbatim_when_nothing_matches(monkeypatch):
 def test_restore_without_a_checkpoint_gives_an_actionable_error(monkeypatch):
     import nbclassic_mcp_bridge_mcp.server as server
 
-    stub = StubRelay()
+    stub = StubRegistry()
     stub.notebook = "nb/a.ipynb"
-    monkeypatch.setattr(server, "_relay", stub)
+    monkeypatch.setattr(server, "_registry", stub)
 
     async def no_checkpoints(url, token, path):
         return []
