@@ -179,9 +179,17 @@ function loadBridge(seed = [["c1", "print(1)"], ["c2", "print(2)"]]) {
 
     FakeWebSocket.instances = [];
     global.WebSocket = FakeWebSocket;
+    // The two ways a refusal arrives: popups.blocked is the browser's own blocker, which returns
+    // null rather than throwing; popups.stubbed is what some content blockers do instead, handing
+    // back a window that is already closed.
+    const popups = { blocked: false, stubbed: false, opened: [] };
     global.window = {
         location: { protocol: "http:", host: "localhost:8888" },
         addEventListener() {},
+        open(url, target) {
+            popups.opened.push({ url: url, target: target });
+            return popups.blocked ? null : { closed: popups.stubbed };
+        },
     };
     global.document = { addEventListener() {}, hidden: false };
     let bridge;
@@ -192,7 +200,7 @@ function loadBridge(seed = [["c1", "print(1)"], ["c2", "print(2)"]]) {
     delete require.cache[require.resolve(MAIN_JS)];
     require(MAIN_JS);
     bridge.load_ipython_extension();
-    return { events: events, notebook: notebook, cells: cells, sockets: FakeWebSocket.instances };
+    return { events: events, notebook: notebook, cells: cells, sockets: FakeWebSocket.instances, popups: popups };
 }
 
 module.exports = { loadBridge: loadBridge, makeCell: makeCell, FakeWebSocket: FakeWebSocket };

@@ -28,7 +28,10 @@ test("hello carries the protocol version, notebook path, and capabilities", () =
     assert.equal(hello.protocol, 0);
     assert.equal(hello.role, "extension");
     assert.equal(hello.notebook, "fake.ipynb");
-    for (const op of ["snapshot", "set_source", "execute_cell", "inspect", "undo_last", "reload_notebook"]) {
+    // The op table is the capability list, so an MCP server talking to an older tab sees an op
+    // missing and reports that rather than sending a command nothing will answer.
+    for (const op of ["snapshot", "set_source", "execute_cell", "inspect", "undo_last", "reload_notebook",
+                      "open_notebook"]) {
         assert.ok(hello.capabilities.includes(op), `capabilities must include ${op}`);
     }
 });
@@ -284,6 +287,67 @@ test("reload_notebook clears stale focus so set_source is not wrongly skipped", 
 
     socket.receive({ kind: "cmd", id: 2, op: "set_source", args: { cell_id: "c1", source: "after reload" } });
     assert.equal(lastReply(socket, 2).result.status, "written");
+});
+
+
+test("open_notebook opens a tab at the notebook's URL under base_url", () => {
+    const bridge = loadBridge();
+    bridge.notebook.base_url = "/user/jesse/";
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "open_notebook", args: { path: "work/scratch.ipynb" } });
+    const reply = lastReply(socket, 1);
+    const expected = "http://localhost:8888/user/jesse/notebooks/work/scratch.ipynb";
+    assert.equal(reply.ok, true);
+    assert.deepEqual(reply.result, { opened: true, url: expected });
+    assert.deepEqual(bridge.popups.opened, [{ url: expected, target: "_blank" }]);
+});
+
+test("open_notebook escapes path segments without eating the separators", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "open_notebook", args: { path: "my work/a b&c.ipynb" } });
+    const url = lastReply(socket, 1).result.url;
+    assert.equal(url, "http://localhost:8888/notebooks/my%20work/a%20b%26c.ipynb");
+});
+
+test("open_notebook builds the same URL whether or not the path carries a leading slash", () => {
+    // create_notebook's caller passes either form, since Jupyter normalizes the slash away.
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "open_notebook", args: { path: "nb/x.ipynb" } });
+    socket.receive({ kind: "cmd", id: 2, op: "open_notebook", args: { path: "/nb/x.ipynb" } });
+    assert.equal(lastReply(socket, 2).result.url, lastReply(socket, 1).result.url);
+    assert.equal(lastReply(socket, 2).result.url, "http://localhost:8888/notebooks/nb/x.ipynb");
+});
+
+for (const [mode, label] of [["blocked", "the blocker returns null"], ["stubbed", "the blocker returns a closed window"]]) {
+    test(`open_notebook reports a refusal as a reply, not an error, when ${label}`, () => {
+        const bridge = loadBridge();
+        bridge.popups[mode] = true;
+        const socket = connect(bridge);
+
+        socket.receive({ kind: "cmd", id: 1, op: "open_notebook", args: { path: "scratch.ipynb" } });
+        const reply = lastReply(socket, 1);
+        // The URL is absolute and part of the contract: a refusal means a human opens it by hand.
+        assert.equal(reply.ok, true);
+        assert.deepEqual(reply.result, {
+            opened: false, reason: "popup blocked", url: "http://localhost:8888/notebooks/scratch.ipynb",
+        });
+    });
+}
+
+test("open_notebook refuses a missing path rather than opening a directory listing", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "open_notebook", args: {} });
+    const reply = lastReply(socket, 1);
+    assert.equal(reply.ok, false);
+    assert.match(reply.error, /needs a notebook path/);
+    assert.deepEqual(bridge.popups.opened, []);
 });
 
 

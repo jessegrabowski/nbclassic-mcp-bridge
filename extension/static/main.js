@@ -315,6 +315,19 @@ define([
             }
             return { results: results };
         },
+        open_notebook: function (args) {
+            var path = args.path;
+            if (typeof path !== "string" || !path) { throw new Error("open_notebook needs a notebook path"); }
+            var url = notebookUrl(path);
+            // Never pass "noopener": it makes window.open return null unconditionally, which the
+            // refusal check below would read as a blocked popup forever. The tab is same-origin,
+            // so there is nothing to gain by it.
+            var handle = window.open(url, "_blank");
+            // A refusal is a normal reply, not an exception: the caller needs the URL to hand to
+            // the human. Blockers refuse by returning null; some return a window already closed.
+            if (!handle || handle.closed) { return { opened: false, reason: "popup blocked", url: url }; }
+            return { opened: true, url: url };
+        },
         reload_notebook: function () {
             var nb = Jupyter.notebook;
             undoStack = [];
@@ -528,6 +541,17 @@ define([
         }
     }
 
+
+    // Absolute because a blocked open reports this URL for the human to open by hand, and each
+    // segment is escaped separately so the separators survive: encodeURIComponent over the whole
+    // path would send Jupyter looking for a file named "a%2Fb".
+    function notebookUrl(path) {
+        var loc = window.location;
+        // Jupyter treats "/nb/x.ipynb" and "nb/x.ipynb" as the same file, so callers pass either;
+        // keeping the leading slash here would build a URL with a doubled separator.
+        var escaped = path.replace(/^\/+/, "").split("/").map(encodeURIComponent).join("/");
+        return loc.protocol + "//" + loc.host + Jupyter.notebook.base_url + "notebooks/" + escaped;
+    }
 
     function relayUrl() {
         var loc = window.location;
