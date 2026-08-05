@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from nbclassic_mcp_bridge_mcp.discovery import (
+    best_matches,
     create_checkpoint,
     fetch_rooms,
     list_sessions,
@@ -39,6 +40,14 @@ OPEN_PATHS = ["notebooks/demo.ipynb", "notebooks/scratch.ipynb", "Untitled.ipynb
 )
 def test_match_notebook_resolves_uniquely(requested, expected):
     assert match_notebook(requested, OPEN_PATHS) == (expected, [])
+
+
+def test_best_matches_reads_the_path_through_a_key():
+    # Attachments carry a server alongside the path, so the same path can appear twice and both
+    # must come back rather than one being picked.
+    candidates = [("a", "nb/report.ipynb"), ("b", "nb/report.ipynb"), ("a", "nb/other.ipynb")]
+    matched = best_matches("report", candidates, key=lambda candidate: candidate[1])
+    assert matched == [("a", "nb/report.ipynb"), ("b", "nb/report.ipynb")]
 
 
 def test_match_notebook_reports_ambiguity():

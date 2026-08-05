@@ -1,3 +1,4 @@
+from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
@@ -54,29 +55,51 @@ def merge_notebook_view(sessions: list[dict], rooms: dict) -> list[dict]:
     return sorted(view.values(), key=lambda record: record["path"])
 
 
-def match_notebook(requested: str, available: list[str]) -> tuple[str | None, list[str]]:
-    """Resolve ``requested`` against the open notebook paths.
+def best_matches[T](requested: str, candidates: Sequence[T], key: Callable[[T], str] | None = None) -> list[T]:
+    """Return the candidates whose path matches ``requested`` in the closest tier that matches at all.
 
-    Return ``(match, candidates)``: an exact or uniquely fuzzy match (case-insensitive path, then
-    basename, then substring), or ``None`` with the candidate paths that made the request ambiguous
-    (empty when nothing was close).
+    Tiers run exact path, case-insensitive path, case-insensitive basename, then substring. Return
+    every candidate in that tier, so a tie is reported rather than resolved, and an empty list when
+    nothing is close.
+
+    Parameters
+    ----------
+    requested : str
+        The path or fragment to match.
+    candidates : list
+        The values to match against.
+    key : callable, optional
+        Extracts the path from a candidate. Default treats each candidate as the path itself.
     """
-    if requested in available:
-        return requested, []
+    path_of = key if key is not None else (lambda candidate: candidate)
+    exact = [candidate for candidate in candidates if path_of(candidate) == requested]
+    if exact:
+        return exact
 
     wanted = requested.strip().removeprefix("./").removeprefix("/")
     tiers = [
-        [p for p in available if p == wanted],
-        [p for p in available if p.lower() == wanted.lower()],
-        [p for p in available if PurePosixPath(p).name.lower() == PurePosixPath(wanted).name.lower()],
-        [p for p in available if wanted.lower() in p.lower()],
+        lambda path: path == wanted,
+        lambda path: path.lower() == wanted.lower(),
+        lambda path: PurePosixPath(path).name.lower() == PurePosixPath(wanted).name.lower(),
+        lambda path: wanted.lower() in path.lower(),
     ]
-    for matches in tiers:
-        if len(matches) == 1:
-            return matches[0], []
-        if matches:
-            return None, sorted(matches)
-    return None, []
+    for matches_tier in tiers:
+        matched = [candidate for candidate in candidates if matches_tier(path_of(candidate))]
+        if matched:
+            return matched
+    return []
+
+
+def match_notebook(requested: str, available: list[str]) -> tuple[str | None, list[str]]:
+    """Resolve ``requested`` against the open notebook paths.
+
+    Return ``(match, candidates)``: a unique match, or ``None`` with the candidate paths that made
+    the request ambiguous (empty when nothing was close).
+    """
+    matched = best_matches(requested, available)
+    if len(matched) == 1:
+        return matched[0], []
+    return None, sorted(matched)
 
 
 async def create_checkpoint(jupyter_url: str, token: str, path: str) -> dict:
