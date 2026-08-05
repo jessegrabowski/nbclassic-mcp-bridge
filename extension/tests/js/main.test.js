@@ -323,6 +323,22 @@ test("open_notebook builds the same URL whether or not the path carries a leadin
     assert.equal(lastReply(socket, 2).result.url, "http://localhost:8888/notebooks/nb/x.ipynb");
 });
 
+for (const [mode, label] of [["blocked", "the blocker returns null"], ["stubbed", "the blocker returns a closed window"]]) {
+    test(`open_notebook reports a refusal as a reply, not an error, when ${label}`, () => {
+        const bridge = loadBridge();
+        bridge.popups[mode] = true;
+        const socket = connect(bridge);
+
+        socket.receive({ kind: "cmd", id: 1, op: "open_notebook", args: { path: "scratch.ipynb" } });
+        const reply = lastReply(socket, 1);
+        // The URL is absolute and part of the contract: a refusal means a human opens it by hand.
+        assert.equal(reply.ok, true);
+        assert.deepEqual(reply.result, {
+            opened: false, reason: "popup blocked", url: "http://localhost:8888/notebooks/scratch.ipynb",
+        });
+    });
+}
+
 test("open_notebook refuses a missing path rather than opening a directory listing", () => {
     const bridge = loadBridge();
     const socket = connect(bridge);
