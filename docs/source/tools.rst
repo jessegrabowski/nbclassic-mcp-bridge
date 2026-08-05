@@ -7,12 +7,17 @@ instructions addressed to it. Long text in results is truncated (~4k characters 
 payload, ~16k per cell source) unless a tool documents a ``full`` argument; image payloads are
 replaced with a stub in text results and fetched through ``read_cell_image``.
 
+Several notebooks can be attached at once. Every tool outside *Attaching* takes an optional
+``notebook`` argument naming one of them and otherwise acts on the current notebook — the one most
+recently attached or named. Tools that change a notebook report which one they changed.
+
 .. currentmodule:: nbclassic_mcp_bridge_mcp.server
 
 Attaching
 ---------
 
 .. autofunction:: use_notebook
+.. autofunction:: detach_notebook
 .. autofunction:: list_notebooks
 .. autofunction:: use_server
 .. autofunction:: use_project
