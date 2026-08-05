@@ -157,6 +157,27 @@ def test_rooms_are_isolated_by_notebook():
     assert mcp_b.sent[-1]["ok"] is False
 
 
+def test_two_mcp_peers_in_distinct_rooms_coexist():
+    # One assistant per notebook, but rooms are independent: a second mcp peer helloing into a
+    # different notebook must not evict the first. Attaching to several notebooks at once rests
+    # entirely on this, so it is pinned rather than left incidental.
+    sb = Switchboard()
+    ext_a = join(sb, "extension", "a.ipynb")
+    ext_b = join(sb, "extension", "b.ipynb")
+    mcp_a = join(sb, "mcp", "a.ipynb")
+    mcp_b = join(sb, "mcp", "b.ipynb")
+
+    assert (mcp_a.closed, mcp_b.closed) == (None, None)
+    assert sb.rooms["a.ipynb"]["mcp"] is mcp_a
+    assert sb.rooms["b.ipynb"]["mcp"] is mcp_b
+    assert sb.presence() == {"a.ipynb": ["extension", "mcp"], "b.ipynb": ["extension", "mcp"]}
+
+    sb.route(mcp_a, json.dumps({"kind": "cmd", "id": 1, "op": "snapshot", "args": {}}))
+    sb.route(mcp_b, json.dumps({"kind": "cmd", "id": 2, "op": "snapshot", "args": {}}))
+    assert [frame["id"] for frame in ext_a.sent if frame["kind"] == "cmd"] == [1]
+    assert [frame["id"] for frame in ext_b.sent if frame["kind"] == "cmd"] == [2]
+
+
 def test_join_notifies_both_peers():
     sb = Switchboard()
     ext = join(sb, "extension")
@@ -226,6 +247,26 @@ def test_presence_forgets_departed_rooms():
 
 def _emit(sb, ext, name, cell_id):
     sb.route(ext, json.dumps({"kind": "event", "name": name, "data": {"cell_id": cell_id}}))
+
+
+def test_events_and_their_numbering_are_scoped_to_one_room():
+    # Each room numbers its own events from 1, and an event reaches only its own room's mcp peer.
+    # A client's replay position is therefore meaningless outside the room it was learned in.
+    sb = Switchboard()
+    ext_a = join(sb, "extension", "a.ipynb")
+    ext_b = join(sb, "extension", "b.ipynb")
+    mcp_a = join(sb, "mcp", "a.ipynb")
+    mcp_b = join(sb, "mcp", "b.ipynb")
+
+    _emit(sb, ext_a, "cell_created", "c1")
+    _emit(sb, ext_a, "cell_deleted", "c1")
+    _emit(sb, ext_b, "cell_created", "c9")
+
+    events_a = [frame for frame in mcp_a.sent if frame["kind"] == "event"]
+    events_b = [frame for frame in mcp_b.sent if frame["kind"] == "event"]
+    assert [frame["seq"] for frame in events_a] == [1, 2]
+    assert [frame["seq"] for frame in events_b] == [1]
+    assert [frame["data"]["cell_id"] for frame in events_b] == ["c9"]
 
 
 def test_events_buffered_while_mcp_is_absent_replay_on_join():
