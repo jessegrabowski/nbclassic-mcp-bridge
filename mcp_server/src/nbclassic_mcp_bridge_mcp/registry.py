@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Callable
 
 from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
 
@@ -14,8 +15,7 @@ class NotebookRegistry:
     registry separately holds the *default* endpoint -- where ``attach`` connects and what discovery
     queries -- which ``retarget`` rewrites.
 
-    Attaching closes every other attachment. The relay holds one room per notebook and tolerates an
-    assistant in each, so that is a policy of the tool surface rather than a limit of the transport.
+    Attaching closes every other attachment.
 
     Parameters
     ----------
@@ -28,7 +28,7 @@ class NotebookRegistry:
         Default ``RelayClient``.
     """
 
-    def __init__(self, jupyter_url: str, token: str, client_factory=RelayClient):
+    def __init__(self, jupyter_url: str, token: str, client_factory: Callable[..., RelayClient] = RelayClient):
         self._jupyter_url = jupyter_url
         self._token = token
         self._client_factory = client_factory
@@ -63,7 +63,6 @@ class NotebookRegistry:
             client = self._clients[key] = self._client_factory(jupyter_url=self._jupyter_url, token=self._token)
         await client.connect(path)
         self._current = key
-        log.info("attached to %s on %s", path, self._jupyter_url)
         return client
 
     def current(self) -> RelayClient:
@@ -83,7 +82,7 @@ class NotebookRegistry:
         """
         if self._current is None:
             return [], cursor
-        return self._clients[self._current].events_since(cursor)
+        return self.current().events_since(cursor)
 
     async def retarget(self, jupyter_url: str, token: str) -> None:
         """Point new attachments at a different Jupyter server, dropping the current attachments."""
@@ -93,7 +92,10 @@ class NotebookRegistry:
 
     async def close_all(self) -> None:
         """Drop every attachment. The browser tabs and their kernels are untouched."""
-        for client in self._clients.values():
-            await client.close()
+        # State first, so a close that raises cannot leave the registry pointing at a client whose
+        # teardown only partly ran.
+        clients = list(self._clients.values())
         self._clients.clear()
         self._current = None
+        for client in clients:
+            await client.close()

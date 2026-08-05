@@ -239,7 +239,7 @@ def test_use_notebook_attaches_verbatim_when_nothing_matches(monkeypatch):
     assert "no browser tab is connected" in message and "nb/a.ipynb" in message
 
 
-class StubSession:
+class StubClient:
     """Attached-notebook double carrying its own endpoint, which need not be the registry default."""
 
     def __init__(self, notebook="nb/a.ipynb"):
@@ -253,30 +253,30 @@ class StubSession:
         return {}
 
 
-class StubSessionRegistry:
+class StubEndpointRegistry:
     """Registry double whose default endpoint differs from its attached notebook's."""
 
-    def __init__(self, session):
+    def __init__(self, client):
         self.jupyter_url = "http://localhost:8888"
         self.token = "tok-default"
-        self._session = session
+        self._client = client
 
     def current(self):
-        return self._session
+        return self._client
 
 
-def _with_session(monkeypatch):
+def _with_client(monkeypatch):
     import nbclassic_mcp_bridge_mcp.server as server
 
-    session = StubSession()
-    monkeypatch.setattr(server, "_registry", StubSessionRegistry(session))
-    return server, session
+    client = StubClient()
+    monkeypatch.setattr(server, "_registry", StubEndpointRegistry(client))
+    return server, client
 
 
 def test_checkpoint_uses_the_attached_notebooks_own_endpoint(monkeypatch):
     # A notebook stays attached to the server it was attached against, so checkpointing has to
     # talk to that server rather than wherever the registry currently points.
-    server, _ = _with_session(monkeypatch)
+    server, _ = _with_client(monkeypatch)
     calls = []
 
     async def create(url, token, path):
@@ -289,7 +289,7 @@ def test_checkpoint_uses_the_attached_notebooks_own_endpoint(monkeypatch):
 
 
 def test_restore_uses_the_attached_notebooks_own_endpoint(monkeypatch):
-    server, session = _with_session(monkeypatch)
+    server, client = _with_client(monkeypatch)
     seen = []
 
     async def list_checkpoints(url, token, path):
@@ -306,7 +306,7 @@ def test_restore_uses_the_attached_notebooks_own_endpoint(monkeypatch):
         ("list", "http://other:9999", "tok-other", "nb/a.ipynb"),
         ("restore", "http://other:9999", "tok-other", "nb/a.ipynb"),
     ]
-    assert session.commands == [("reload_notebook", {})]
+    assert client.commands == [("reload_notebook", {})]
     assert "restored nb/a.ipynb to checkpoint cp1" in message
 
 

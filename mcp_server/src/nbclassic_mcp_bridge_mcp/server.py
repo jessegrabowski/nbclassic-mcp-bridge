@@ -8,7 +8,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 
 from nbclassic_mcp_bridge_mcp import discovery
-from nbclassic_mcp_bridge_mcp.sessions import NotebookRegistry
+from nbclassic_mcp_bridge_mcp.registry import NotebookRegistry
 
 
 log = logging.getLogger(__name__)
@@ -202,8 +202,8 @@ async def use_notebook(path: str | None = None) -> str:
             path = match
         # No match at all still attaches verbatim: the room outlives this call, so opening the
         # notebook afterwards completes the attachment.
-    session = await _registry.attach(path)
-    if await session.extension_present():
+    client = await _registry.attach(path)
+    if await client.extension_present():
         return f"attached to {path}{note} (browser tab connected)"
     open_listing = ", ".join(n["path"] for n in notebooks) or "none"
     return (
@@ -404,8 +404,8 @@ async def checkpoint_notebook() -> dict:
     Uses Jupyter's single default checkpoint slot -- the same one the human's "Save and
     Checkpoint" writes -- so create one deliberately, not routinely.
     """
-    session = _registry.current()
-    return await discovery.create_checkpoint(session.jupyter_url, session.token, session.notebook)
+    client = _registry.current()
+    return await discovery.create_checkpoint(client.jupyter_url, client.token, client.notebook)
 
 
 @mcp.tool()
@@ -415,13 +415,13 @@ async def restore_notebook_checkpoint() -> str:
     DESTRUCTIVE: the file on disk reverts to the checkpoint and the browser tab reloads from disk,
     discarding any unsaved edits (the human's included). Confirm with the human first.
     """
-    session = _registry.current()
-    url, token, path = session.jupyter_url, session.token, session.notebook
+    client = _registry.current()
+    url, token, path = client.jupyter_url, client.token, client.notebook
     checkpoints = await discovery.list_checkpoints(url, token, path)
     if not checkpoints:
         raise RuntimeError(f"no checkpoint exists for {path}; call checkpoint_notebook first")
     await discovery.restore_checkpoint(url, token, path, checkpoints[0]["id"])
-    await session.command("reload_notebook", {})
+    await client.command("reload_notebook", {})
     return f"restored {path} to checkpoint {checkpoints[0]['id']} and reloaded the browser tab"
 
 

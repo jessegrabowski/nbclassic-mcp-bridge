@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from nbclassic_mcp_bridge_mcp.sessions import NotebookRegistry
+from nbclassic_mcp_bridge_mcp.registry import NotebookRegistry
 
 
 # Attaching to this path fails, standing in for a stopped server or a rejected token.
