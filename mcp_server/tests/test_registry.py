@@ -5,7 +5,9 @@ import pytest
 from nbclassic_mcp_bridge_mcp.registry import NotebookRegistry
 
 
-# Attaching to this path fails, standing in for a stopped server or a rejected token.
+# A path no client can dial, standing in for a stopped server or a rejected token. Clients built
+# inside attach cannot be flagged beforehand, so the failure has to ride on the path; an existing
+# client is flagged directly with connect_fails.
 UNREACHABLE = "nb/unreachable.ipynb"
 
 
@@ -19,15 +21,19 @@ class FakeClient:
         self.connects: list[str] = []
         self.closes = 0
         self.events: list[dict] = []
+        self.connect_fails = False
+        self.close_fails = False
 
     async def connect(self, path):
-        if path == UNREACHABLE:
+        if path == UNREACHABLE or self.connect_fails:
             raise ConnectionError("jupyter server refused the websocket")
         self.connects.append(path)
         self.notebook = path
 
     async def close(self):
         self.closes += 1
+        if self.close_fails:
+            raise ConnectionError("socket teardown failed")
 
     def events_since(self, cursor):
         return self.events[cursor:], len(self.events)
@@ -48,7 +54,7 @@ def build(url="http://a:8888", token="tok-a"):
 def test_attach_connects_and_becomes_current():
     registry, created = build()
     client = asyncio.run(registry.attach("nb/a.ipynb"))
-    assert created == [client]
+    assert len(created) == 1
     assert client.connects == ["nb/a.ipynb"]
     assert (client.jupyter_url, client.token) == ("http://a:8888", "tok-a")
     assert registry.current() is client
@@ -94,6 +100,23 @@ def test_a_failed_attach_reports_that_nothing_is_attached():
         registry.current()
 
 
+def test_a_failed_reattach_keeps_the_notebook_attached():
+    # Reattaching the same notebook tears nothing down, so a connect failure leaves the existing
+    # client in place rather than detaching -- command() reconnects it on the next call. The
+    # asymmetry with attaching a *different* notebook is deliberate.
+    registry, created = build()
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        created[0].connect_fails = True
+        with pytest.raises(ConnectionError):
+            await registry.attach("nb/a.ipynb")
+
+    asyncio.run(scenario())
+    assert created[0].closes == 0
+    assert registry.current() is created[0]
+
+
 def test_reattaching_the_same_notebook_reuses_its_client():
     # A repeated use_notebook must not discard the event log or the replay position, so the
     # client is reconnected rather than replaced.
@@ -109,7 +132,7 @@ def test_reattaching_the_same_notebook_reuses_its_client():
     assert created[0].closes == 0
 
 
-def test_the_same_path_on_another_server_is_a_different_attachment():
+def test_retargeting_rebuilds_the_same_path_against_the_new_server():
     registry, created = build()
 
     async def scenario():
@@ -147,6 +170,22 @@ def test_events_come_from_the_attached_notebook():
 def test_polling_before_attaching_yields_nothing_instead_of_raising():
     registry, _ = build()
     assert registry.events_since(7) == ([], 7)
+
+
+def test_a_failing_close_still_leaves_the_registry_empty():
+    # State is cleared before the sockets are torn down, so a close that raises cannot leave
+    # current() naming a client whose teardown only partly ran.
+    registry, created = build()
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        created[0].close_fails = True
+        with pytest.raises(ConnectionError):
+            await registry.close_all()
+
+    asyncio.run(scenario())
+    with pytest.raises(RuntimeError, match="use_notebook first"):
+        registry.current()
 
 
 def test_close_all_drops_every_client_and_clears_current():
