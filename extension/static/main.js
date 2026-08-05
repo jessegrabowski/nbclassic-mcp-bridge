@@ -315,6 +315,13 @@ define([
             }
             return { results: results };
         },
+        open_notebook: function (args) {
+            var path = args.path;
+            if (typeof path !== "string" || !path) { throw new Error("open_notebook needs a notebook path"); }
+            var url = notebookUrl(path);
+            window.open(url, "_blank");
+            return { opened: true, url: url };
+        },
         reload_notebook: function () {
             var nb = Jupyter.notebook;
             undoStack = [];
@@ -528,6 +535,17 @@ define([
         }
     }
 
+
+    // Absolute because a blocked open reports this URL for the human to open by hand, and each
+    // segment is escaped separately so the separators survive: encodeURIComponent over the whole
+    // path would send Jupyter looking for a file named "a%2Fb".
+    function notebookUrl(path) {
+        var loc = window.location;
+        // Jupyter treats "/nb/x.ipynb" and "nb/x.ipynb" as the same file, so callers pass either;
+        // keeping the leading slash here would build a URL with a doubled separator.
+        var escaped = path.replace(/^\/+/, "").split("/").map(encodeURIComponent).join("/");
+        return loc.protocol + "//" + loc.host + Jupyter.notebook.base_url + "notebooks/" + escaped;
+    }
 
     function relayUrl() {
         var loc = window.location;

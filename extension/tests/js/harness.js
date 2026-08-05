@@ -179,9 +179,15 @@ function loadBridge(seed = [["c1", "print(1)"], ["c2", "print(2)"]]) {
 
     FakeWebSocket.instances = [];
     global.WebSocket = FakeWebSocket;
+    // popups.opened records every window.open the bridge attempts.
+    const popups = { opened: [] };
     global.window = {
         location: { protocol: "http:", host: "localhost:8888" },
         addEventListener() {},
+        open(url, target) {
+            popups.opened.push({ url: url, target: target });
+            return { closed: false };
+        },
     };
     global.document = { addEventListener() {}, hidden: false };
     let bridge;
@@ -192,7 +198,7 @@ function loadBridge(seed = [["c1", "print(1)"], ["c2", "print(2)"]]) {
     delete require.cache[require.resolve(MAIN_JS)];
     require(MAIN_JS);
     bridge.load_ipython_extension();
-    return { events: events, notebook: notebook, cells: cells, sockets: FakeWebSocket.instances };
+    return { events: events, notebook: notebook, cells: cells, sockets: FakeWebSocket.instances, popups: popups };
 }
 
 module.exports = { loadBridge: loadBridge, makeCell: makeCell, FakeWebSocket: FakeWebSocket };
