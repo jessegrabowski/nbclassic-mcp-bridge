@@ -2,16 +2,13 @@ import asyncio
 import itertools
 import json
 import logging
-from collections import deque
+from collections.abc import Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import websockets
 
 
 PROTOCOL_VERSION = 0
-
-# Cap on retained events; older ones fall off the poll feed.
-_EVENT_LOG_MAXLEN = 1000
 
 # A notebook snapshot with image outputs runs to several MiB; lift the websockets
 # client's 1 MiB default frame ceiling well past it.
@@ -24,21 +21,31 @@ class RelayClient:
     """WebSocket client to the nbclassic-mcp-bridge relay (role = "mcp").
 
     Holds one connection to the relay for the attached notebook. ``command`` issues a ``cmd`` frame
-    and awaits the matching ``reply``; ``_read_loop`` resolves those replies, files unsolicited
-    ``event`` frames (the human's edits) into a bounded log that ``events_since`` drains, and tracks
-    the extension peer's presence from ``status`` frames.
+    and awaits the matching ``reply``; ``_read_loop`` resolves those replies, hands unsolicited
+    ``event`` frames (the human's edits) to ``on_event`` once, and tracks the extension peer's
+    presence from ``status`` frames.
+
+    Parameters
+    ----------
+    jupyter_url : str
+        Base URL of the Jupyter server holding the notebook.
+    token : str
+        Authentication token for that server.
+    on_event : callable, optional
+        Receives each accepted event frame. Events the relay replays after a reconnect are dropped
+        before it sees them, so it is called exactly once per event. Default None, which discards
+        events -- nothing is listening.
     """
 
-    def __init__(self, jupyter_url: str, token: str):
+    def __init__(self, jupyter_url: str, token: str, on_event: Callable[[dict], None] | None = None):
         self._jupyter_url = jupyter_url
         self._token = token
+        self._on_event = on_event
         self._ws = None
         self._notebook: str | None = None
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
-        self._seq = itertools.count(1)
-        self._event_log: deque[tuple[int, dict]] = deque(maxlen=_EVENT_LOG_MAXLEN)
         # Where this client stands in the relay's per-room event numbering; sent in the hello so
         # the relay replays exactly the events missed while detached, and nothing twice.
         self._relay_log_id: str | None = None
@@ -145,15 +152,6 @@ class RelayClient:
             raise RuntimeError(error)
         return reply.get("result")
 
-    def events_since(self, cursor: int) -> tuple[list[dict], int]:
-        """Return events logged after ``cursor`` and the cursor to pass next.
-
-        ``cursor`` is the value returned by the previous call, or 0 to start.
-        """
-        fresh = [event for seq, event in self._event_log if seq > cursor]
-        latest = self._event_log[-1][0] if self._event_log else cursor
-        return fresh, latest
-
     async def _dial(self, notebook: str) -> None:
         """Open the socket, send the hello, and start the reader. Caller holds the lock."""
         self._extension_joined.clear()
@@ -231,8 +229,8 @@ class RelayClient:
                     if fut is not None and not fut.done():
                         fut.set_result(msg)
                 elif kind == "event":
-                    if self._accept_event(msg):
-                        self._event_log.append((next(self._seq), msg))
+                    if self._accept_event(msg) and self._on_event is not None:
+                        self._on_event(msg)
                 elif kind == "status" and msg.get("peer") == "extension":
                     if msg.get("state") == "joined":
                         capabilities = msg.get("capabilities")

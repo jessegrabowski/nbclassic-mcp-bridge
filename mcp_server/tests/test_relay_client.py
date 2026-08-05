@@ -151,25 +151,21 @@ def test_command_before_connect_raises():
         asyncio.run(scenario())
 
 
-def test_events_are_logged_and_polled_with_a_cursor():
+def test_events_reach_the_callback_in_arrival_order():
     async def scenario():
         events = [
             ("cell_created", {"cell_id": "a"}),
             ("source_changed", {"cell_id": "a", "source": "y"}),
         ]
+        seen = []
         async with FakeRelay(events=events) as relay:
-            client = RelayClient(relay.jupyter_url, "tok")
+            client = RelayClient(relay.jupyter_url, "tok", on_event=seen.append)
             await client.connect("nb.ipynb")
             await client.command("snapshot", {})  # barrier: events arrive first (FIFO)
-            first, cursor = client.events_since(0)
-            second, cursor_again = client.events_since(cursor)
             await client.close()
-            return first, cursor, second, cursor_again
+            return seen
 
-    first, cursor, second, cursor_again = asyncio.run(scenario())
-    assert [e["name"] for e in first] == ["cell_created", "source_changed"]
-    assert second == []
-    assert cursor_again == cursor
+    assert [e["name"] for e in asyncio.run(scenario())] == ["cell_created", "source_changed"]
 
 
 def test_disconnect_fails_a_pending_command_instead_of_hanging():
@@ -215,26 +211,6 @@ def test_extension_present_reflects_the_relay_status_frame(joined):
     assert asyncio.run(scenario()) is joined
 
 
-def test_events_since_recovers_from_a_stale_cursor():
-    # An MCP restart resets the event log while an agent may still hold its old, larger cursor;
-    # the poll must come back empty with a usable cursor instead of hiding new events forever.
-    async def scenario():
-        events = [("cell_created", {"cell_id": "a"}), ("cell_deleted", {"cell_id": "a"})]
-        async with FakeRelay(events=events) as relay:
-            client = RelayClient(relay.jupyter_url, "tok")
-            await client.connect("nb.ipynb")
-            await client.command("snapshot", {})  # barrier: events arrive first (FIFO)
-            stale, recovered_cursor = client.events_since(cursor=10_000)
-            fresh, _ = client.events_since(0)
-            await client.close()
-            return stale, recovered_cursor, fresh
-
-    stale, recovered_cursor, fresh = asyncio.run(scenario())
-    assert stale == []
-    assert recovered_cursor == 2
-    assert [e["name"] for e in fresh] == ["cell_created", "cell_deleted"]
-
-
 def test_command_reattaches_after_the_relay_drops_the_connection():
     async def scenario():
         async with FakeRelay(replies={"snapshot": {"ok": True, "result": "ok"}}) as relay:
@@ -271,14 +247,15 @@ def test_reattach_does_not_duplicate_replayed_events():
     async def scenario():
         events = [("cell_created", {"cell_id": "a"}), ("cell_deleted", {"cell_id": "a"})]
         async with FakeRelay(replies={"snapshot": {"ok": True, "result": None}}, events=events) as relay:
-            client = RelayClient(relay.jupyter_url, "tok")
+            seen = []
+            client = RelayClient(relay.jupyter_url, "tok", on_event=seen.append)
             await client.connect("nb.ipynb")
             await client.command("snapshot", {})  # barrier: replay lands first
-            first, cursor = client.events_since(0)
+            first = list(seen)
 
             await relay.kick()
             await client.command("snapshot", {})  # reattaches; hello carries the last seen seq
-            fresh, _ = client.events_since(cursor)
+            fresh = seen[len(first) :]
             await client.close()
             return first, fresh, relay.hellos
 
@@ -295,15 +272,16 @@ def test_a_new_relay_log_resets_the_dedup_position():
     async def scenario():
         events = [("cell_created", {"cell_id": "a"}), ("cell_deleted", {"cell_id": "a"})]
         async with FakeRelay(replies={"snapshot": {"ok": True, "result": None}}, events=events) as relay:
-            client = RelayClient(relay.jupyter_url, "tok")
+            seen = []
+            client = RelayClient(relay.jupyter_url, "tok", on_event=seen.append)
             await client.connect("nb.ipynb")
             await client.command("snapshot", {})
-            _, cursor = client.events_since(0)
+            already = len(seen)
 
             await relay.kick()
             relay.log_id = "reborn-log"  # same events, renumbered by a "restarted" relay
             await client.command("snapshot", {})
-            replayed, _ = client.events_since(cursor)
+            replayed = seen[already:]
             await client.close()
             return replayed
 
@@ -311,15 +289,15 @@ def test_a_new_relay_log_resets_the_dedup_position():
     assert [event["name"] for event in replayed] == ["cell_created", "cell_deleted"]
 
 
-def test_stamps_never_reach_the_agent_facing_event_log():
+def test_relay_stamps_are_stripped_before_the_callback():
     async def scenario():
+        seen = []
         async with FakeRelay(events=[("cell_created", {"cell_id": "a"})]) as relay:
-            client = RelayClient(relay.jupyter_url, "tok")
+            client = RelayClient(relay.jupyter_url, "tok", on_event=seen.append)
             await client.connect("nb.ipynb")
             await client.command("snapshot", {})
-            logged, _ = client.events_since(0)
             await client.close()
-            return logged
+            return seen
 
     logged = asyncio.run(scenario())
     assert logged == [{"kind": "event", "name": "cell_created", "data": {"cell_id": "a"}}]
@@ -416,13 +394,14 @@ def test_capabilities_clear_when_the_tab_leaves_mid_session():
         relay = FakeRelay(extension_joined=True, capabilities=["snapshot"])
         relay.replies["undo_last"] = {"ok": False, "error": "no extension peer connected"}
         async with relay:
-            client = RelayClient(relay.jupyter_url, "tok")
+            seen = []
+            client = RelayClient(relay.jupyter_url, "tok", on_event=seen.append)
             await client.connect("nb.ipynb")
             assert await client.extension_present()
 
             await relay.broadcast({"kind": "status", "peer": "extension", "state": "left"})
             await relay.broadcast({"kind": "event", "name": "marker", "data": {}})
-            while not client.events_since(0)[0]:  # FIFO barrier: the left frame arrived first
+            while not seen:  # FIFO barrier: the left frame arrived first
                 await asyncio.sleep(0.01)
 
             try:

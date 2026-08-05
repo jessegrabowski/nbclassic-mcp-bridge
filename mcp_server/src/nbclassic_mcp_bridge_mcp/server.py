@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP, Image
@@ -171,6 +172,20 @@ def _find_attachment(notebook: str | None) -> Attachment:
     if len(matches) > 1:
         listing = ", ".join(_registry.label(match) for match in matches)
         raise RuntimeError(f"'{notebook}' matches several attached notebooks ({listing}); name one exactly")
+    return matches[0]
+
+
+def _find_event_source(notebook: str) -> Attachment:
+    """Resolve a poll filter against every notebook the retained events came from, attached or not.
+
+    A detached notebook keeps the events it already raised, so naming it here keeps working.
+    """
+    matches = _registry.find_source(notebook)
+    if not matches:
+        raise RuntimeError(f"no retained events from '{notebook}'; attached: {_registry.attached_listing()}")
+    if len(matches) > 1:
+        listing = ", ".join(_registry.label(match) for match in matches)
+        raise RuntimeError(f"'{notebook}' matches several notebooks ({listing}); name one exactly")
     return matches[0]
 
 
@@ -552,19 +567,26 @@ async def restore_notebook_checkpoint(notebook: str | None = None) -> str:
 
 
 @mcp.tool()
-async def poll_events(cursor: int = 0) -> dict:
-    """Return the human's notebook edits since ``cursor``.
+async def poll_events(cursor: int = 0, notebook: str | None = None) -> dict:
+    """Return the human's notebook edits since ``cursor``, across every attached notebook.
 
     Pass 0 on the first call, then feed the returned ``cursor`` back to get only newer events. Each
-    event is ``{name, data}`` -- one of cell_created, cell_deleted, cell_moved, cell_executed,
-    source_changed, focus_changed, bridge_paused, bridge_resumed, kernel_status -- and reflects the
-    human's actions (never an echo of your own commands) plus kernel failures and recoveries.
-    Events that fire while this server is detached are replayed on reconnect from a bounded relay
-    buffer, so brief gaps do not lose edits. While the human has the bridge paused, every command
-    fails with "bridge paused by the user" until a bridge_resumed event arrives. Image payloads
-    are omitted from cell_executed outputs; use ``read_cell_image`` to view them.
+    event is ``{notebook, name, data}`` -- one of cell_created, cell_deleted, cell_moved,
+    cell_executed, source_changed, focus_changed, bridge_paused, bridge_resumed, kernel_status --
+    and reflects the human's actions (never an echo of your own commands) plus kernel failures and
+    recoveries. One stream carries every attached notebook in the order things happened, so watching
+    several costs one call; ``notebook`` narrows what comes back without changing the cursor, which
+    always tracks the whole stream, and may name a notebook that has since been detached. Events that fire
+    while this server is detached are replayed on reconnect from a bounded relay buffer, so brief
+    gaps do not lose edits. While the human has the bridge paused, every command fails with "bridge
+    paused by the user" until a bridge_resumed event arrives. Image payloads are omitted from
+    cell_executed outputs; use ``read_cell_image`` to view them. Default cursor 0, notebook None.
     """
-    events, new_cursor = _registry.events_since(cursor)
+    wanted = _find_event_source(notebook) if notebook is not None else None
+    recorded, new_cursor = _registry.events_since(cursor, wanted)
+    # Deep-copied because the cleaners mutate outputs in place and these events stay in the log:
+    # truncating an already-truncated payload rewrites the marker to understate what was dropped.
+    events = [{**deepcopy(event), "notebook": _registry.label(attachment)} for attachment, event in recorded]
     return _clean_event_outputs({"events": events, "cursor": new_cursor})
 
 
