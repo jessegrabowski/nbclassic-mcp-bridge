@@ -65,12 +65,24 @@ def _wait_for_kernel(port, timeout=45):
 
 
 async def _wait_for_live_kernel(page, port):
-    """Block until the kernel is running server-side and the page's kernel websocket is connected."""
+    """Block until the kernel completes a round-trip, not merely until its socket reports connected."""
     _wait_for_kernel(port)
     await page.wait_for_function(
         "() => { var k = window.Jupyter && Jupyter.notebook && Jupyter.notebook.kernel;"
         " return !!k && (!k.is_connected || k.is_connected()); }",
         timeout=45000,
+    )
+    # An open socket does not mean the iopub subscription is established; an execute sent into that
+    # gap loses its idle status, so prove the channel before any test depends on it.
+    await page.evaluate(
+        """() => new Promise(function (resolve, reject) {
+            var timer = setTimeout(function () { reject(new Error("kernel never reported idle")); }, 30000);
+            Jupyter.notebook.kernel.execute("pass", {
+                iopub: { status: function (msg) {
+                    if (msg.content.execution_state === "idle") { clearTimeout(timer); resolve(); }
+                } },
+            }, { silent: true, store_history: false });
+        })"""
     )
 
 
