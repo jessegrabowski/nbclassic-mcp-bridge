@@ -3,6 +3,7 @@ import hashlib
 
 import pytest
 
+from nbclassic_mcp_bridge_mcp.registry import Attachment, NotebookRegistry
 from nbclassic_mcp_bridge_mcp.server import (
     _JUPYTER_URL,
     _cell_output_view,
@@ -159,84 +160,233 @@ def test_cell_output_view_full_skips_text_truncation():
     assert _cell_output_view(fresh_cell(), full=True)["outputs"][0]["text"] == "z" * 10000
 
 
-class StubRegistry:
-    """Registry double for tool-level tests: records attachments, scripts tab presence."""
-
-    def __init__(self, tab_connected=True):
-        self.jupyter_url = "http://localhost:8888"
-        self.token = "tok"
-        self.connected_to = None
-        self.notebook = None
-        self._tab_connected = tab_connected
-
-    async def attach(self, path):
-        self.connected_to = path
-        self.notebook = path
-        return self
-
-    def current(self):
-        if self.notebook is None:
-            raise RuntimeError("not attached -- call use_notebook first")
-        return self
-
-    async def extension_present(self, timeout=0.5):
-        return self._tab_connected
-
-
-def _run_use_notebook(monkeypatch, notebooks, path=None, tab_connected=True):
-    import nbclassic_mcp_bridge_mcp.server as server
-
-    stub = StubRegistry(tab_connected)
-    monkeypatch.setattr(server, "_registry", stub)
-
-    async def fake_open_notebooks():
-        return notebooks
-
-    monkeypatch.setattr(server, "_open_notebooks", fake_open_notebooks)
-    return asyncio.run(server.use_notebook(path)), stub
-
-
 def _record(path, tab=True):
     return {"path": path, "kernel_state": "idle", "browser_tab_connected": tab, "assistant_attached": False}
 
 
+DEFAULT_URL = "http://a:8888"
+OTHER_URL = "http://b:9999"
+OTHER_TOKEN = "tok-b"
+
+
+def _run_use_notebook(monkeypatch, notebooks, path=None, tab_connected=True):
+    """Drive use_notebook against a real registry; return its message and the registry."""
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: notebooks}, tab_connected=tab_connected)
+    return asyncio.run(server.use_notebook(path)), registry
+
+
+def _attached_paths(registry):
+    return [attachment.path for attachment in registry.attachments()]
+
+
 def test_use_notebook_auto_attaches_the_only_open_notebook(monkeypatch):
-    message, stub = _run_use_notebook(monkeypatch, [_record("nb/a.ipynb")])
-    assert stub.connected_to == "nb/a.ipynb"
+    message, registry = _run_use_notebook(monkeypatch, [_record("nb/a.ipynb")])
+    assert _attached_paths(registry) == ["nb/a.ipynb"]
     assert "attached to nb/a.ipynb" in message and "browser tab connected" in message
 
 
 def test_use_notebook_prefers_the_notebook_with_a_live_tab(monkeypatch):
     notebooks = [_record("nb/a.ipynb", tab=False), _record("nb/b.ipynb", tab=True)]
-    _, stub = _run_use_notebook(monkeypatch, notebooks)
-    assert stub.connected_to == "nb/b.ipynb"
+    _, registry = _run_use_notebook(monkeypatch, notebooks)
+    assert _attached_paths(registry) == ["nb/b.ipynb"]
 
 
 def test_use_notebook_lists_options_instead_of_guessing(monkeypatch):
     notebooks = [_record("nb/a.ipynb"), _record("nb/b.ipynb")]
-    message, stub = _run_use_notebook(monkeypatch, notebooks)
-    assert stub.connected_to is None
+    message, registry = _run_use_notebook(monkeypatch, notebooks)
+    assert _attached_paths(registry) == []
     assert "nb/a.ipynb" in message and "nb/b.ipynb" in message
 
 
 def test_use_notebook_resolves_a_fuzzy_path(monkeypatch):
-    message, stub = _run_use_notebook(monkeypatch, [_record("notebooks/demo.ipynb")], path="demo.ipynb")
-    assert stub.connected_to == "notebooks/demo.ipynb"
+    message, registry = _run_use_notebook(monkeypatch, [_record("notebooks/demo.ipynb")], path="demo.ipynb")
+    assert _attached_paths(registry) == ["notebooks/demo.ipynb"]
     assert "resolved from 'demo.ipynb'" in message
 
 
 def test_use_notebook_reports_ambiguous_paths_without_attaching(monkeypatch):
     notebooks = [_record("a/report.ipynb"), _record("b/report.ipynb")]
-    message, stub = _run_use_notebook(monkeypatch, notebooks, path="report.ipynb")
-    assert stub.connected_to is None
+    message, registry = _run_use_notebook(monkeypatch, notebooks, path="report.ipynb")
+    assert _attached_paths(registry) == []
     assert "a/report.ipynb" in message and "b/report.ipynb" in message
 
 
 def test_use_notebook_attaches_verbatim_when_nothing_matches(monkeypatch):
     # The room outlives the call, so attaching before the human opens the notebook still works.
-    message, stub = _run_use_notebook(monkeypatch, [_record("nb/a.ipynb")], path="new.ipynb", tab_connected=False)
-    assert stub.connected_to == "new.ipynb"
+    message, registry = _run_use_notebook(monkeypatch, [_record("nb/a.ipynb")], path="new.ipynb", tab_connected=False)
+    assert _attached_paths(registry) == ["new.ipynb"]
     assert "no browser tab is connected" in message and "nb/a.ipynb" in message
+
+
+@pytest.mark.parametrize("tab_connected", [True, False], ids=["tab-connected", "no-tab"])
+def test_use_notebook_names_the_other_attachments(monkeypatch, tab_connected):
+    # The assistant is re-told what else it holds rather than having to remember across calls, on
+    # both replies -- they are analogous by design, which is where one quietly drifts.
+    server, _ = _with_registry(
+        monkeypatch,
+        {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]},
+        tab_connected=tab_connected,
+    )
+
+    async def scenario():
+        await server.use_notebook("nb/a.ipynb")
+        return await server.use_notebook("nb/b.ipynb")
+
+    message = asyncio.run(scenario())
+    assert "attached to nb/b.ipynb" in message
+    assert "also attached: nb/a.ipynb" in message
+
+
+class FakeRelayClient:
+    """Minimal relay client for driving a real NotebookRegistry through the tools."""
+
+    def __init__(self, jupyter_url, token):
+        self.jupyter_url = jupyter_url
+        self.token = token
+        self.notebook = None
+
+    async def connect(self, path):
+        self.notebook = path
+
+    async def close(self):
+        pass
+
+    async def extension_present(self, timeout=0.5):
+        return self.tab_connected
+
+
+def _with_registry(monkeypatch, open_notebooks, unreachable=(), tab_connected=True):
+    """Install a real registry backed by relay stubs.
+
+    ``open_notebooks`` maps a Jupyter URL to the discovery records that server reports; a URL in
+    ``unreachable`` raises instead, standing in for a server that is not running.
+    """
+    import nbclassic_mcp_bridge_mcp.server as server
+
+    def factory(jupyter_url, token):
+        client = FakeRelayClient(jupyter_url, token)
+        client.tab_connected = tab_connected
+        return client
+
+    registry = NotebookRegistry(DEFAULT_URL, "tok-a", client_factory=factory)
+    monkeypatch.setattr(server, "_registry", registry)
+
+    async def fake_open(jupyter_url, token):
+        if jupyter_url in unreachable:
+            raise RuntimeError(f"could not reach the Jupyter server at {jupyter_url}")
+        return [dict(record) for record in open_notebooks.get(jupyter_url, [])]
+
+    monkeypatch.setattr(server, "_open_notebooks", fake_open)
+    return server, registry
+
+
+def test_list_notebooks_survives_an_unreachable_server(monkeypatch):
+    # list_notebooks is what the assistant reaches for once it has lost track of state, and the
+    # default endpoint is routinely a server that is not running -- so one dead server must not
+    # hide the notebooks on the live ones.
+    server, registry = _with_registry(monkeypatch, {OTHER_URL: [_record("nb/a.ipynb")]}, unreachable={DEFAULT_URL})
+
+    async def scenario():
+        registry.retarget(OTHER_URL, OTHER_TOKEN)
+        await registry.attach("nb/a.ipynb")
+        registry.retarget(DEFAULT_URL, "tok-a")
+        return await server.list_notebooks()
+
+    records = asyncio.run(scenario())
+    failed = [record for record in records if "error" in record]
+    live = [record for record in records if "error" not in record]
+    assert [record["jupyter_url"] for record in failed] == [DEFAULT_URL]
+    assert "could not reach" in failed[0]["error"]
+    assert [record["path"] for record in live] == ["nb/a.ipynb"]
+    assert live[0]["attached"] is True
+
+
+def test_list_notebooks_marks_attached_and_current(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+    asyncio.run(registry.attach("nb/a.ipynb"))
+
+    by_path = {record["path"]: record for record in asyncio.run(server.list_notebooks())}
+    assert (by_path["nb/a.ipynb"]["attached"], by_path["nb/a.ipynb"]["current"]) == (True, True)
+    assert (by_path["nb/b.ipynb"]["attached"], by_path["nb/b.ipynb"]["current"]) == (False, False)
+    # A single-server session never sees a URL.
+    assert "jupyter_url" not in by_path["nb/a.ipynb"]
+
+
+def test_list_notebooks_spans_servers_once_two_are_in_play(monkeypatch):
+    server, registry = _with_registry(
+        monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")], OTHER_URL: [_record("nb/a.ipynb")]}
+    )
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        registry.retarget(OTHER_URL, OTHER_TOKEN)
+        await registry.attach("nb/a.ipynb")
+        return await server.list_notebooks()
+
+    records = asyncio.run(scenario())
+    assert sorted(record["jupyter_url"] for record in records) == [DEFAULT_URL, OTHER_URL]
+    assert all(record["attached"] for record in records)
+    assert [record["current"] for record in records].count(True) == 1
+
+
+def test_detach_notebook_leaves_the_other_attachments(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        return await server.detach_notebook("nb/a.ipynb")
+
+    message = asyncio.run(scenario())
+    assert "detached nb/a.ipynb" in message and "still attached: nb/b.ipynb" in message
+    assert registry.is_current(Attachment(DEFAULT_URL, "nb/b.ipynb"))
+
+
+def test_detaching_the_current_notebook_says_there_is_none(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await registry.attach("nb/b.ipynb")
+        return await server.detach_notebook("nb/b.ipynb")
+
+    message = asyncio.run(scenario())
+    assert "no current notebook" in message
+    with pytest.raises(RuntimeError, match="no current notebook"):
+        registry.current()
+
+
+def test_detach_notebook_with_nothing_attached_says_none(monkeypatch):
+    # Detaching before ever attaching is an ordinary mistake, and it renders the empty listing.
+    server, _ = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    with pytest.raises(RuntimeError, match="not attached; attached: none"):
+        asyncio.run(server.detach_notebook("nb/a.ipynb"))
+
+
+def test_detach_notebook_rejects_an_unattached_path(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+    asyncio.run(registry.attach("nb/a.ipynb"))
+    with pytest.raises(RuntimeError, match=r"not attached; attached: nb/a\.ipynb"):
+        asyncio.run(server.detach_notebook("nb/zzz.ipynb"))
+
+
+def test_detach_notebook_asks_which_server_when_a_path_is_attached_twice(monkeypatch):
+    # Ambiguity is guidance, not failure -- the same answer use_notebook gives when several
+    # notebooks match, so the assistant's next move is a better call rather than a recovery.
+    server, registry = _with_registry(
+        monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")], OTHER_URL: [_record("nb/a.ipynb")]}
+    )
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        registry.retarget(OTHER_URL, OTHER_TOKEN)
+        await registry.attach("nb/a.ipynb")
+        return await server.detach_notebook("nb/a.ipynb")
+
+    message = asyncio.run(scenario())
+    assert "attached on several servers" in message
+    assert DEFAULT_URL in message and OTHER_URL in message
+    assert len(registry.attachments()) == 2
 
 
 class StubClient:
@@ -311,19 +461,13 @@ def test_restore_uses_the_attached_notebooks_own_endpoint(monkeypatch):
 
 
 def test_checkpoint_without_an_attachment_points_at_use_notebook(monkeypatch):
-    import nbclassic_mcp_bridge_mcp.server as server
-
-    monkeypatch.setattr(server, "_registry", StubRegistry())
+    server, _ = _with_registry(monkeypatch, {})
     with pytest.raises(RuntimeError, match="use_notebook first"):
         asyncio.run(server.checkpoint_notebook())
 
 
 def test_restore_without_a_checkpoint_gives_an_actionable_error(monkeypatch):
-    import nbclassic_mcp_bridge_mcp.server as server
-
-    stub = StubRegistry()
-    stub.notebook = "nb/a.ipynb"
-    monkeypatch.setattr(server, "_registry", stub)
+    server, _ = _with_client(monkeypatch)
 
     async def no_checkpoints(url, token, path):
         return []

@@ -8,7 +8,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 
 from nbclassic_mcp_bridge_mcp import discovery
-from nbclassic_mcp_bridge_mcp.registry import NotebookRegistry
+from nbclassic_mcp_bridge_mcp.registry import Attachment, NotebookRegistry
 
 
 log = logging.getLogger(__name__)
@@ -156,34 +156,54 @@ def _derive_endpoint(project_path: str) -> tuple[str, str]:
     return _JUPYTER_URL, token
 
 
-async def _open_notebooks() -> list[dict]:
-    """Fetch the merged discovery view for the relay's current Jupyter server."""
-    sessions = await discovery.list_sessions(_registry.jupyter_url, _registry.token)
-    rooms = await discovery.fetch_rooms(_registry.jupyter_url, _registry.token)
+async def _open_notebooks(jupyter_url: str, token: str) -> list[dict]:
+    """Fetch the merged discovery view for one Jupyter server."""
+    sessions = await discovery.list_sessions(jupyter_url, token)
+    rooms = await discovery.fetch_rooms(jupyter_url, token)
     return discovery.merge_notebook_view(sessions, rooms)
 
 
 @mcp.tool()
 async def list_notebooks() -> list[dict]:
-    """List the notebooks open on the Jupyter server.
+    """List the notebooks open on every Jupyter server this session has touched.
 
-    Each record carries the notebook's path, kernel state, and whether a browser tab and an
-    assistant are currently connected to it.
+    Each record carries the notebook's path, kernel state, whether a browser tab and an assistant
+    are connected, whether the bridge is ``attached`` to it, and whether it is the ``current``
+    notebook that commands target by default. ``jupyter_url`` appears only when more than one
+    server is in play. A server that cannot be reached contributes one ``{jupyter_url, error}``
+    record instead of failing the whole listing, so the notebooks on the reachable servers stay
+    visible.
     """
-    return await _open_notebooks()
+    endpoints = _registry.endpoints()
+    records = []
+    for url, token in endpoints:
+        try:
+            open_here = await _open_notebooks(url, token)
+        except RuntimeError as exc:
+            records.append({"jupyter_url": url, "error": str(exc)})
+            continue
+        for record in open_here:
+            attachment = Attachment(url, record["path"])
+            record["attached"] = _registry.is_attached(attachment)
+            record["current"] = _registry.is_current(attachment)
+            if len(endpoints) > 1:
+                record["jupyter_url"] = url
+            records.append(record)
+    return records
 
 
 @mcp.tool()
 async def use_notebook(path: str | None = None) -> str:
-    """Attach the bridge to a notebook open in the classic Notebook UI.
+    """Attach the bridge to a notebook open in the classic Notebook UI, and make it current.
 
-    With no ``path``, attach to the only open notebook (preferring one with a connected browser
-    tab); when several are open, list them instead of guessing. A ``path`` that does not exactly
-    match an open notebook is resolved fuzzily (case-insensitive, basename, substring). The reply
-    states whether the notebook's browser tab is connected -- commands only work once the human has
-    the notebook open. Default None.
+    Notebooks already attached stay attached, so several can be held at once; this one becomes the
+    notebook commands target by default. With no ``path``, attach to the only open notebook
+    (preferring one with a connected browser tab); when several are open, list them instead of
+    guessing. A ``path`` that does not exactly match an open notebook is resolved fuzzily
+    (case-insensitive, basename, substring). The reply states whether the notebook's browser tab is
+    connected -- commands only work once the human has the notebook open. Default None.
     """
-    notebooks = await _open_notebooks()
+    notebooks = await _open_notebooks(_registry.jupyter_url, _registry.token)
     note = ""
     if path is None:
         candidates = [n for n in notebooks if n["browser_tab_connected"]] or notebooks
@@ -203,12 +223,17 @@ async def use_notebook(path: str | None = None) -> str:
         # No match at all still attaches verbatim: the room outlives this call, so opening the
         # notebook afterwards completes the attachment.
     client = await _registry.attach(path)
+    others = sorted(
+        _registry.label(attachment) for attachment in _registry.attachments() if not _registry.is_current(attachment)
+    )
+    also = f"; also attached: {', '.join(others)}" if others else ""
     if await client.extension_present():
-        return f"attached to {path}{note} (browser tab connected)"
+        return f"attached to {path}{note} (browser tab connected){also}"
     open_listing = ", ".join(n["path"] for n in notebooks) or "none"
     return (
         f"attached to {path}{note}, but no browser tab is connected for that path -- "
-        f"commands will fail until the notebook is open in the classic UI. Open notebooks: {open_listing}"
+        f"commands will fail until the notebook is open in the classic UI. "
+        f"Open notebooks: {open_listing}{also}"
     )
 
 
@@ -234,6 +259,27 @@ async def use_project(path: str) -> str:
     jupyter_url, token = _derive_endpoint(path)
     _registry.retarget(jupyter_url, token)
     return f"new attachments will use {jupyter_url} (derived from {path})"
+
+
+@mcp.tool()
+async def detach_notebook(notebook: str) -> str:
+    """Stop tracking a notebook. Its browser tab and kernel are left untouched.
+
+    Drops the bridge's connection only -- nothing is saved, closed, or reverted, and the human's tab
+    keeps working. Detaching the current notebook leaves no current notebook, so call use_notebook
+    to pick another.
+    """
+    matches = _registry.matching(notebook)
+    if not matches:
+        raise RuntimeError(f"{notebook} is not attached; attached: {_registry.attached_listing()}")
+    if len(matches) > 1:
+        listing = ", ".join(_registry.label(match) for match in matches)
+        return f"'{notebook}' is attached on several servers ({listing}); use_server to pick one, then detach"
+    target = matches[0]
+    was_current = _registry.is_current(target)
+    await _registry.detach(target)
+    suffix = "; no current notebook -- call use_notebook to pick one" if was_current else ""
+    return f"detached {notebook}; still attached: {_registry.attached_listing()}{suffix}"
 
 
 @mcp.tool()
