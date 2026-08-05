@@ -576,7 +576,9 @@ async def poll_events(cursor: int = 0, notebook: str | None = None) -> dict:
     and reflects the human's actions (never an echo of your own commands) plus kernel failures and
     recoveries. One stream carries every attached notebook in the order things happened, so watching
     several costs one call; ``notebook`` narrows what comes back without changing the cursor, which
-    always tracks the whole stream, and may name a notebook that has since been detached. Events that fire
+    always tracks the whole stream, and may name a notebook that has since been detached. A
+    ``dropped`` count appears when the log aged past ``cursor`` before you polled -- that many events
+    are gone, and the retained budget is shared across every attached notebook. Events that fire
     while this server is detached are replayed on reconnect from a bounded relay buffer, so brief
     gaps do not lose edits. While the human has the bridge paused, every command fails with "bridge
     paused by the user" until a bridge_resumed event arrives. Image payloads are omitted from
@@ -587,7 +589,11 @@ async def poll_events(cursor: int = 0, notebook: str | None = None) -> dict:
     # Deep-copied because the cleaners mutate outputs in place and these events stay in the log:
     # truncating an already-truncated payload rewrites the marker to understate what was dropped.
     events = [{**deepcopy(event), "notebook": _registry.label(attachment)} for attachment, event in recorded]
-    return _clean_event_outputs({"events": events, "cursor": new_cursor})
+    result = {"events": events, "cursor": new_cursor}
+    dropped = _registry.dropped_before(cursor)
+    if dropped:
+        result["dropped"] = dropped
+    return _clean_event_outputs(result)
 
 
 def main():

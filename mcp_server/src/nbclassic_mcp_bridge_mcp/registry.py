@@ -200,6 +200,13 @@ class NotebookRegistry:
         known = list(dict.fromkeys([*self._clients, *(attachment for _, attachment, _ in self._events)]))
         return discovery.best_matches(notebook, known, key=lambda attachment: attachment.path)
 
+    def dropped_before(self, cursor: int) -> int:
+        """Count the events that aged out of the log before ``cursor`` could reach them."""
+        if not self._events:
+            return 0
+        oldest = self._events[0][0]
+        return max(0, oldest - 1 - cursor)
+
     def retarget(self, jupyter_url: str, token: str) -> None:
         """Point new attachments at a different Jupyter server.
 

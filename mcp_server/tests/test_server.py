@@ -691,6 +691,56 @@ def test_poll_events_can_filter_a_notebook_that_has_since_detached(monkeypatch):
     assert [e["name"] for e in asyncio.run(scenario())["events"]] == ["cell_created"]
 
 
+def test_poll_events_reports_events_that_aged_out(monkeypatch):
+    import nbclassic_mcp_bridge_mcp.registry as registry_module
+
+    monkeypatch.setattr(registry_module, "EVENT_LOG_MAXLEN", 2)
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        client = _clients_by_path(registry)["nb/a.ipynb"]
+        for _ in range(5):
+            client.emit("cell_created")
+        return await server.poll_events()
+
+    result = asyncio.run(scenario())
+    assert len(result["events"]) == 2
+    assert result["dropped"] == 3
+
+
+def test_poll_events_omits_dropped_when_nothing_was_lost(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        _clients_by_path(registry)["nb/a.ipynb"].emit("cell_created")
+        return await server.poll_events()
+
+    assert "dropped" not in asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "filter_name, expected",
+    [("nb/zzz.ipynb", "no retained events"), ("report", "matches several notebooks")],
+    ids=["no-match", "ambiguous"],
+)
+def test_poll_events_rejects_a_filter_it_cannot_resolve(monkeypatch, filter_name, expected):
+    # The poll filter resolves against a different candidate set than the tools do, so its own
+    # failure branches need covering -- they are where the two resolvers drift apart.
+    server, registry = _with_registry(
+        monkeypatch, {DEFAULT_URL: [_record("a/report.ipynb"), _record("b/report.ipynb")]}
+    )
+
+    async def scenario():
+        await registry.attach("a/report.ipynb")
+        await registry.attach("b/report.ipynb")
+        await server.poll_events(notebook=filter_name)
+
+    with pytest.raises(RuntimeError, match=expected):
+        asyncio.run(scenario())
+
+
 def test_poll_events_does_not_retarget_the_current_notebook(monkeypatch):
     server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb"), _record("nb/b.ipynb")]})
 
