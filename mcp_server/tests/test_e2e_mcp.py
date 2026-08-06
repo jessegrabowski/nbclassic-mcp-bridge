@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 import pytest
@@ -99,42 +100,94 @@ def _wait_until_up(port, timeout=40):
     raise RuntimeError("nbclassic did not come up")
 
 
+def _serving(tmp_path, *notebooks):
+    """Seed ``notebooks`` with the standard fixture and start nbclassic over them.
+
+    Return the server's port and its process.
+    """
+    port = _free_port()
+    for notebook in notebooks:
+        Path(tmp_path, notebook).write_text(json.dumps(_SEED_NOTEBOOK))
+    return port, _spawn_nbclassic(port, tmp_path)
+
+
+def _stop(server_proc):
+    server_proc.terminate()
+    try:
+        server_proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        server_proc.kill()
+
+
+@contextmanager
+def _nbclassic(tmp_path, *notebooks):
+    """Serve ``notebooks`` for the duration of the block, always stopping the server afterwards."""
+    port, server_proc = _serving(tmp_path, *notebooks)
+    try:
+        yield port
+    finally:
+        _stop(server_proc)
+
+
+def _driven(scenario, timeout=300):
+    """Run one test's async scenario under a wall-clock cap, so a hang fails instead of stalling CI."""
+    asyncio.run(asyncio.wait_for(scenario(), timeout=timeout))
+
+
+async def _open_tabs(browser, port, *notebooks):
+    """Open one browser tab per notebook and return them in the order given."""
+    pages = []
+    for notebook in notebooks:
+        page = await browser.new_page()
+        await page.goto(f"http://localhost:{port}/notebooks/{notebook}?token={TOKEN}")
+        await page.wait_for_selector(".cell", timeout=20000)
+        pages.append(page)
+    return pages
+
+
+@asynccontextmanager
+async def _bridge_session(port):
+    """Run the real MCP server binary over stdio against the Jupyter server on ``port``."""
+    bridge = StdioServerParameters(
+        command=sys.executable,
+        args=["-m", "nbclassic_mcp_bridge_mcp.server"],
+        env={**os.environ, "JUPYTER_URL": f"http://localhost:{port}", "JUPYTER_TOKEN": TOKEN},
+    )
+    async with stdio_client(bridge) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            yield session
+
+
+def _text(result):
+    """Join a tool result's text blocks, which is how tools report both prose and JSON."""
+    return " ".join(part.text for part in result.content if hasattr(part, "text"))
+
+
+def _payload(result):
+    """Parse a tool result that returns one structured object."""
+    return json.loads(_text(result))
+
+
 def test_read_cell_image_round_trips_over_the_mcp_protocol(tmp_path):
     """Drive the real server binary over stdio: a stored PNG must arrive as an ImageContent block."""
-    port = _free_port()
-    Path(tmp_path, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
-    server_proc = _spawn_nbclassic(port, tmp_path)
+    with _nbclassic(tmp_path, NOTEBOOK) as port:
 
-    async def scenario():
-        _wait_until_up(port)
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch()
-            page = await browser.new_page()
-            await page.goto(f"http://localhost:{port}/notebooks/{NOTEBOOK}?token={TOKEN}")
-            await page.wait_for_selector(".cell", timeout=20000)
+        async def scenario():
+            _wait_until_up(port)
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch()
+                await _open_tabs(browser, port, NOTEBOOK)
 
-            bridge = StdioServerParameters(
-                command=sys.executable,
-                args=["-m", "nbclassic_mcp_bridge_mcp.server"],
-                env={
-                    **os.environ,
-                    "JUPYTER_URL": f"http://localhost:{port}",
-                    "JUPYTER_TOKEN": TOKEN,
-                },
-            )
-            async with stdio_client(bridge) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-
+                async with _bridge_session(port) as session:
                     attached = await session.call_tool("use_notebook", {})
                     attach_message = attached.content[0].text
                     assert f"attached to {NOTEBOOK}" in attach_message
                     assert "browser tab connected" in attach_message
 
-                    listing = await session.call_tool("list_notebooks", {})
-                    listing_text = " ".join(part.text for part in listing.content if hasattr(part, "text"))
-                    assert NOTEBOOK in listing_text
-                    assert '"browser_tab_connected": true' in listing_text
+                    listing = _text(await session.call_tool("list_notebooks", {}))
+                    assert NOTEBOOK in listing
+                    assert '"browser_tab_connected": true' in listing
 
                     image_result = await session.call_tool("read_cell_image", {"cell_id": "img1"})
                     image = image_result.content[0]
@@ -142,51 +195,33 @@ def test_read_cell_image_round_trips_over_the_mcp_protocol(tmp_path):
                     assert image.mimeType == "image/png"
                     assert base64.b64decode(image.data) == base64.b64decode(ONE_PX_PNG)
 
-            await browser.close()
+                await browser.close()
 
-    try:
-        asyncio.run(asyncio.wait_for(scenario(), timeout=180))
-    finally:
-        server_proc.terminate()
-        try:
-            server_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server_proc.kill()
+        _driven(scenario, timeout=180)
 
 
 def test_checkpoint_and_restore_revert_the_notebook(tmp_path):
-    port = _free_port()
-    Path(tmp_path, NOTEBOOK).write_text(json.dumps(_SEED_NOTEBOOK))
-    server_proc = _spawn_nbclassic(port, tmp_path)
+    with _nbclassic(tmp_path, NOTEBOOK) as port:
 
-    def put_source(source):
-        notebook = json.loads(Path(tmp_path, NOTEBOOK).read_text())
-        notebook["cells"][0]["source"] = source
-        body = json.dumps({"type": "notebook", "format": "json", "content": notebook}).encode()
-        request = urllib.request.Request(
-            f"http://localhost:{port}/api/contents/{NOTEBOOK}?token={TOKEN}",
-            data=body,
-            method="PUT",
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(request, timeout=5)
-
-    async def scenario():
-        _wait_until_up(port)
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch()
-            page = await browser.new_page()
-            await page.goto(f"http://localhost:{port}/notebooks/{NOTEBOOK}?token={TOKEN}")
-            await page.wait_for_selector(".cell", timeout=20000)
-
-            bridge = StdioServerParameters(
-                command=sys.executable,
-                args=["-m", "nbclassic_mcp_bridge_mcp.server"],
-                env={**os.environ, "JUPYTER_URL": f"http://localhost:{port}", "JUPYTER_TOKEN": TOKEN},
+        def put_source(source):
+            notebook = json.loads(Path(tmp_path, NOTEBOOK).read_text())
+            notebook["cells"][0]["source"] = source
+            body = json.dumps({"type": "notebook", "format": "json", "content": notebook}).encode()
+            request = urllib.request.Request(
+                f"http://localhost:{port}/api/contents/{NOTEBOOK}?token={TOKEN}",
+                data=body,
+                method="PUT",
+                headers={"Content-Type": "application/json"},
             )
-            async with stdio_client(bridge) as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
+            urllib.request.urlopen(request, timeout=5)
+
+        async def scenario():
+            _wait_until_up(port)
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch()
+                await _open_tabs(browser, port, NOTEBOOK)
+
+                async with _bridge_session(port) as session:
                     await session.call_tool("use_notebook", {})
 
                     await session.call_tool("checkpoint_notebook", {})
@@ -195,18 +230,10 @@ def test_checkpoint_and_restore_revert_the_notebook(tmp_path):
                     restored = await session.call_tool("restore_notebook_checkpoint", {})
                     assert "restored" in restored.content[0].text
 
-                    listing = await session.call_tool("read_notebook", {})
-                    listing_text = " ".join(part.text for part in listing.content if hasattr(part, "text"))
-                    assert "show_plot()" in listing_text
-                    assert "overwritten_on_disk" not in listing_text
+                    listing = _text(await session.call_tool("read_notebook", {}))
+                    assert "show_plot()" in listing
+                    assert "overwritten_on_disk" not in listing
 
-            await browser.close()
+                await browser.close()
 
-    try:
-        asyncio.run(asyncio.wait_for(scenario(), timeout=180))
-    finally:
-        server_proc.terminate()
-        try:
-            server_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server_proc.kill()
+        _driven(scenario, timeout=180)
