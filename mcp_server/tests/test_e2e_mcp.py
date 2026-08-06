@@ -412,3 +412,36 @@ def test_create_open_attach_and_execute_without_leaving_the_assistant(tmp_path):
                 await browser.close()
 
         _driven(scenario, timeout=300)
+
+
+def test_undo_stays_inside_the_notebook_it_was_made_in(tmp_path):
+    """The undo stack lives in each browser tab, so undoing one notebook must not touch the other."""
+    with _nbclassic(tmp_path, FIRST, SECOND) as port:
+
+        async def scenario():
+            _wait_until_up(port)
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch()
+                await _open_tabs(browser, port, FIRST, SECOND)
+
+                async with _bridge_session(port) as session:
+                    for notebook in (FIRST, SECOND):
+                        await session.call_tool("use_notebook", {"path": notebook})
+                        await session.call_tool(
+                            "insert_cell",
+                            {"index": 0, "cell_type": "code", "source": f"# added to {notebook}", "notebook": notebook},
+                        )
+
+                    undone = _payload(await session.call_tool("undo_last_change", {"notebook": FIRST}))
+                    assert undone["status"] == "undone", undone
+
+                    assert f"# added to {FIRST}" not in _text(
+                        await session.call_tool("read_notebook", {"notebook": FIRST})
+                    )
+                    assert f"# added to {SECOND}" in _text(
+                        await session.call_tool("read_notebook", {"notebook": SECOND})
+                    )
+
+                await browser.close()
+
+        _driven(scenario, timeout=300)
