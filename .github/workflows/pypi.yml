@@ -43,3 +43,7 @@ jobs:
           path: dist
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          # An upload that dies partway leaves files on PyPI that can never be re-uploaded, so a
+          # rerun must skip them instead of aborting on the first one.
+          skip-existing: true
