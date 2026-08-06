@@ -14,10 +14,15 @@ import pytest
 
 pytest.importorskip("playwright.async_api")
 pytest.importorskip("nbclassic_mcp_bridge")
+# The helper that serves the working tree's extension lives with the extension's own tests. Adding
+# the path here rather than in pyproject.toml keeps a single-file pytest run working, and adding a
+# second conftest.py would collide with the extension tests' `from conftest import ...`.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "extension" / "tests"))
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import ImageContent
 from playwright.async_api import async_playwright
+from repo_assets import jupyter_path_serving_the_repo
 
 
 pytestmark = pytest.mark.e2e
@@ -64,7 +69,11 @@ def _spawn_nbclassic(port, nbdir):
             "--ServerApp.jpserver_extensions={'nbclassic_mcp_bridge':True}",
         ],
         cwd=nbdir,
-        env={**os.environ, "JUPYTER_TOKEN": TOKEN},
+        env={
+            **os.environ,
+            "JUPYTER_TOKEN": TOKEN,
+            "JUPYTER_PATH": jupyter_path_serving_the_repo(nbdir),
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
