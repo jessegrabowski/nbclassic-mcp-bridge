@@ -70,6 +70,19 @@ def test_clean_output_without_truncate_keeps_text_but_still_strips_images():
     assert output["data"]["text/plain"] == "y" * 10000
 
 
+def test_stripped_image_names_the_call_that_fetches_it():
+    output = {"output_type": "display_data", "data": {"image/png": "BASE64BLOB"}}
+    _clean_output(output, cell_id="abc123")
+    placeholder = output["data"]["image/png"]
+    assert 'read_cell_image(cell_id="abc123")' in placeholder
+
+    # Kernel introspection produces no cell, so there is no id to fetch the image by.
+    loose = {"output_type": "display_data", "data": {"image/png": "BASE64BLOB"}}
+    _clean_output(loose)
+    assert "read_cell_image" in loose["data"]["image/png"]
+    assert "cell_id=" not in loose["data"]["image/png"]
+
+
 def test_summarize_output_describes_without_payload():
     stream = _summarize_output({"output_type": "stream", "name": "stdout", "text": "abcde"})
     assert stream == {"output_type": "stream", "name": "stdout", "chars": 5}

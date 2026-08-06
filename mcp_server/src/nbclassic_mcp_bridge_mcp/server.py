@@ -68,7 +68,14 @@ def _truncate(text: str, limit: int = _OUTPUT_CHAR_LIMIT) -> str:
     return text[:limit] + f"\n...[truncated -- {len(text) - limit} more chars]"
 
 
-def _clean_output(output, truncate: bool = True) -> None:
+def _image_placeholder(mime: str, cell_id: str | None) -> str:
+    """Describe a stripped image payload, naming the call that fetches it when a cell holds it."""
+    if cell_id:
+        return f'<{mime} omitted; call read_cell_image(cell_id="{cell_id}") to view it>'
+    return f"<{mime} omitted; images are only retrievable from a cell, via read_cell_image>"
+
+
+def _clean_output(output, truncate: bool = True, cell_id: str | None = None) -> None:
     """Strip images, and (when ``truncate``) cap long text, in one output."""
     if not isinstance(output, dict):
         return
@@ -81,7 +88,7 @@ def _clean_output(output, truncate: bool = True) -> None:
         for mime, payload in list(data.items()):
             if mime.startswith("image/"):
                 if not ALLOW_IMG_OUTPUT:
-                    data[mime] = f"<{mime} omitted; set ALLOW_IMG_OUTPUT=1 to include>"
+                    data[mime] = _image_placeholder(mime, cell_id)
             elif truncate and isinstance(payload, (str, list)):
                 data[mime] = _truncate(_as_text(payload))
 
@@ -89,8 +96,9 @@ def _clean_output(output, truncate: bool = True) -> None:
 def _clean_event_outputs(payload: dict) -> dict:
     """Clean outputs carried by cell_executed events (poll_events)."""
     for event in payload.get("events", []):
-        for output in event.get("data", {}).get("outputs", []):
-            _clean_output(output)
+        data = event.get("data", {})
+        for output in data.get("outputs", []):
+            _clean_output(output, cell_id=data.get("cell_id"))
     return payload
 
 
@@ -138,9 +146,10 @@ def _cell_source_view(cell: dict, full: bool) -> dict:
 def _cell_output_view(cell: dict, full: bool) -> dict:
     """Project a cell to its outputs plus id, dropping source."""
     outputs = cell.get("outputs", [])
+    cell_id = cell.get("cell_id")
     for output in outputs:
-        _clean_output(output, truncate=not full)
-    return {"cell_id": cell.get("cell_id"), "outputs": outputs}
+        _clean_output(output, truncate=not full, cell_id=cell_id)
+    return {"cell_id": cell_id, "outputs": outputs}
 
 
 def _extract_images(cell: dict) -> list[tuple[str, str]]:
@@ -554,7 +563,7 @@ async def run_cells(cell_ids: list[str], timeout_s: float = 600, notebook: str |
     result = await client.command("run_cells", {"cell_ids": cell_ids, "timeout_ms": int(timeout_s * 1000)})
     for cell_result in result.get("results", []):
         for output in cell_result.get("outputs", []):
-            _clean_output(output)
+            _clean_output(output, cell_id=cell_result.get("cell_id"))
     return _echo(result, target)
 
 

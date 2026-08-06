@@ -221,11 +221,15 @@ async def _request_json(method: str, jupyter_url: str, endpoint: str, token: str
             response.raise_for_status()
             return response.json() if response.content else None
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
+        status = exc.response.status_code
+        if status == 404:
             raise  # fetch_rooms distinguishes a missing endpoint from a failure
-        raise RuntimeError(
-            f"the Jupyter server at {jupyter_url} answered {exc.response.status_code} "
-            f"for {endpoint} -- check JUPYTER_TOKEN"
-        ) from exc
+        if status in (401, 403):
+            raise RuntimeError(
+                f"the Jupyter server at {jupyter_url} rejected this token ({status} for {endpoint}). "
+                f"Call use_project with the project directory to derive the server and token from "
+                f"that path, or use_server if the URL and token are already known."
+            ) from exc
+        raise RuntimeError(f"the Jupyter server at {jupyter_url} answered {status} for {endpoint}") from exc
     except httpx.RequestError as exc:
         raise RuntimeError(f"could not reach the Jupyter server at {jupyter_url}: {exc}") from exc

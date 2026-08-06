@@ -219,7 +219,11 @@ def test_http_errors_never_leak_the_token(monkeypatch):
     assert seen["auth_header"] == "token SECRET-TOKEN"
     assert "SECRET-TOKEN" not in seen["url"]
     assert "SECRET-TOKEN" not in str(exc_info.value)
-    assert "403" in str(exc_info.value) and "JUPYTER_TOKEN" in str(exc_info.value)
+    message = str(exc_info.value)
+    assert "403" in message
+    # The recovery has to be reachable from inside the session, so the message names the tools that
+    # re-point the bridge rather than an environment variable the caller cannot set.
+    assert "use_project" in message and "use_server" in message
 
 
 def test_fetch_rooms_treats_a_missing_endpoint_as_no_rooms(monkeypatch):
