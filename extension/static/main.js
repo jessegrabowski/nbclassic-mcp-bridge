@@ -191,7 +191,7 @@ define([
             var stripped = {};
             Object.keys(data).forEach(function (mime) {
                 stripped[mime] = mime.indexOf("image/") === 0
-                    ? "<" + mime + " omitted from event; read the cell's outputs to fetch it>"
+                    ? "<" + mime + " omitted from event; call read_cell_image to view it>"
                     : data[mime];
             });
             output.data = stripped;
