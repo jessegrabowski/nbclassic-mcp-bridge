@@ -169,6 +169,40 @@ def _payload(result):
     return json.loads(_text(result))
 
 
+async def _prove_kernel_answers(session, notebook, timeout=60):
+    """Block until the notebook's kernel round-trips a trivial evaluation through the bridge.
+
+    A kernel whose socket is connected can still drop an execute sent before its iopub
+    subscription is established, so wait on an answer rather than on a connection.
+    """
+    deadline = time.monotonic() + timeout
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            answer = _payload(await session.call_tool("inspect_kernel", {"code": "1 + 1", "notebook": notebook}))
+            # A failed evaluation still returns a reply, and its traceback can contain any digit, so
+            # read the value out of the execute_result rather than searching the whole payload.
+            values = [
+                output.get("data", {}).get("text/plain", "")
+                for output in answer.get("outputs", [])
+                if output.get("output_type") == "execute_result"
+            ]
+            if any(value.strip() == "2" for value in values):
+                return
+            last_error = answer
+        except Exception as exc:  # the kernel is not up yet; the deadline is the real guard
+            last_error = str(exc)
+        await asyncio.sleep(0.5)
+    raise RuntimeError(f"kernel for {notebook} never answered: {last_error}")
+
+
+async def _stdout_of(session, cell_id, notebook):
+    """Execute a cell and return its stdout, so a test asserts on output rather than on a status."""
+    result = await session.call_tool("execute_cell", {"cell_id": cell_id, "notebook": notebook})
+    outputs = _payload(result).get("outputs", [])
+    return "".join(output.get("text", "") for output in outputs if output.get("output_type") == "stream")
+
+
 def test_read_cell_image_round_trips_over_the_mcp_protocol(tmp_path):
     """Drive the real server binary over stdio: a stored PNG must arrive as an ImageContent block."""
     with _nbclassic(tmp_path, NOTEBOOK) as port:
@@ -237,3 +271,53 @@ def test_checkpoint_and_restore_revert_the_notebook(tmp_path):
                 await browser.close()
 
         _driven(scenario, timeout=180)
+
+
+FIRST = "first.ipynb"
+SECOND = "second.ipynb"
+
+
+def test_two_notebooks_are_edited_and_executed_independently(tmp_path):
+    """Two attached notebooks, two live tabs: each cell's output lands in its own notebook."""
+    with _nbclassic(tmp_path, FIRST, SECOND) as port:
+
+        async def scenario():
+            _wait_until_up(port)
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch()
+                await _open_tabs(browser, port, FIRST, SECOND)
+
+                async with _bridge_session(port) as session:
+                    for notebook in (FIRST, SECOND):
+                        assert f"attached to {notebook}" in _text(
+                            await session.call_tool("use_notebook", {"path": notebook})
+                        )
+                    await _prove_kernel_answers(session, FIRST)
+                    await _prove_kernel_answers(session, SECOND)
+
+                    cells = {}
+                    for notebook in (FIRST, SECOND):
+                        created = await session.call_tool(
+                            "insert_cell",
+                            {
+                                "index": 0,
+                                "cell_type": "code",
+                                "source": f"print('from {notebook}')",
+                                "notebook": notebook,
+                            },
+                        )
+                        cells[notebook] = _payload(created)["cell_id"]
+
+                    for notebook in (FIRST, SECOND):
+                        stdout = await _stdout_of(session, cells[notebook], notebook)
+                        assert f"from {notebook}" in stdout
+
+                    # Each notebook must hold its own cell and nothing of the other's.
+                    for notebook, other in ((FIRST, SECOND), (SECOND, FIRST)):
+                        contents = _text(await session.call_tool("read_notebook", {"notebook": notebook}))
+                        assert f"from {notebook}" in contents
+                        assert f"from {other}" not in contents
+
+                await browser.close()
+
+        _driven(scenario, timeout=300)
