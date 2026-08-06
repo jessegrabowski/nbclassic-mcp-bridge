@@ -196,6 +196,19 @@ async def _prove_kernel_answers(session, notebook, timeout=60):
     raise RuntimeError(f"kernel for {notebook} never answered: {last_error}")
 
 
+async def _drain_source_changes(session, cursor, timeout=30):
+    """Poll until at least one source_changed arrives; return those events and the new cursor."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        polled = _payload(await session.call_tool("poll_events", {"cursor": cursor}))
+        cursor = polled["cursor"]
+        changes = [event for event in polled["events"] if event["name"] == "source_changed"]
+        if changes:
+            return changes, cursor
+        await asyncio.sleep(0.5)
+    raise RuntimeError("no source_changed event arrived")
+
+
 async def _stdout_of(session, cell_id, notebook):
     """Execute a cell and return its stdout, so a test asserts on output rather than on a status."""
     result = await session.call_tool("execute_cell", {"cell_id": cell_id, "notebook": notebook})
@@ -317,6 +330,41 @@ def test_two_notebooks_are_edited_and_executed_independently(tmp_path):
                         contents = _text(await session.call_tool("read_notebook", {"notebook": notebook}))
                         assert f"from {notebook}" in contents
                         assert f"from {other}" not in contents
+
+                await browser.close()
+
+        _driven(scenario, timeout=300)
+
+
+def test_events_from_both_notebooks_merge_into_one_stream(tmp_path):
+    """A human edit in each tab reaches one cursor-ordered stream, each event naming its notebook."""
+    with _nbclassic(tmp_path, FIRST, SECOND) as port:
+
+        async def scenario():
+            _wait_until_up(port)
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch()
+                first_tab, second_tab = await _open_tabs(browser, port, FIRST, SECOND)
+
+                async with _bridge_session(port) as session:
+                    for notebook in (FIRST, SECOND):
+                        await session.call_tool("use_notebook", {"path": notebook})
+
+                    # Human edits, not agent ones: set_text from the page is what the extension debounces
+                    # into a source_changed event. The second edit waits for the first event so the
+                    # expected order is the one the edits actually happened in.
+                    typing = "(text) => Jupyter.notebook.get_cell(0).set_text(text)"
+                    await first_tab.evaluate(typing, "# typed in first")
+                    first_events, cursor = await _drain_source_changes(session, cursor=0)
+                    await second_tab.evaluate(typing, "# typed in second")
+                    second_events, cursor = await _drain_source_changes(session, cursor)
+
+                    assert [event["notebook"] for event in first_events] == [FIRST]
+                    # Only the second notebook's event comes back, so the cursor advanced past the
+                    # first rather than re-delivering it.
+                    assert [event["notebook"] for event in second_events] == [SECOND]
+                    assert "typed in first" in first_events[0]["data"]["source"]
+                    assert "typed in second" in second_events[0]["data"]["source"]
 
                 await browser.close()
 
