@@ -169,6 +169,11 @@ def _payload(result):
     return json.loads(_text(result))
 
 
+def _records(result):
+    """Parse a tool result that returns a list; each item arrives as its own text block."""
+    return [json.loads(part.text) for part in result.content if hasattr(part, "text")]
+
+
 async def _prove_kernel_answers(session, notebook, timeout=60):
     """Block until the notebook's kernel round-trips a trivial evaluation through the bridge.
 
@@ -365,6 +370,44 @@ def test_events_from_both_notebooks_merge_into_one_stream(tmp_path):
                     assert [event["notebook"] for event in second_events] == [SECOND]
                     assert "typed in first" in first_events[0]["data"]["source"]
                     assert "typed in second" in second_events[0]["data"]["source"]
+
+                await browser.close()
+
+        _driven(scenario, timeout=300)
+
+
+def test_create_open_attach_and_execute_without_leaving_the_assistant(tmp_path):
+    """create_notebook(open=True) gets a tab, attaches, and the new notebook runs code."""
+    with _nbclassic(tmp_path, FIRST) as port:
+
+        async def scenario():
+            _wait_until_up(port)
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch()
+                await _open_tabs(browser, port, FIRST)
+
+                async with _bridge_session(port) as session:
+                    await session.call_tool("use_notebook", {"path": FIRST})
+
+                    created = _text(await session.call_tool("create_notebook", {"path": "made.ipynb", "open": True}))
+                    assert "opened it in a new tab, and attached" in created, created
+                    assert Path(tmp_path, "made.ipynb").exists()
+
+                    # The notebook that was asked to open the tab stays attached: attachments accumulate.
+                    listing = {
+                        record["path"]: record for record in _records(await session.call_tool("list_notebooks", {}))
+                    }
+                    assert listing[FIRST]["attached"]
+                    assert listing["made.ipynb"]["current"]
+
+                    await _prove_kernel_answers(session, "made.ipynb")
+                    cell = _payload(
+                        await session.call_tool(
+                            "insert_cell",
+                            {"index": 0, "cell_type": "code", "source": "print('made it')", "notebook": "made.ipynb"},
+                        )
+                    )
+                    assert "made it" in await _stdout_of(session, cell["cell_id"], "made.ipynb")
 
                 await browser.close()
 
