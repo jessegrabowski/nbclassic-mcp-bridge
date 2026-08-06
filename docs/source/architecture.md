@@ -27,6 +27,15 @@ Eviction applies to the `mcp` slot too, but without the stand-down: a second ass
 first, and the first reattaches — evicting back — the next time it issues a command. One assistant
 per notebook is the supported arrangement.
 
+Rooms are independent, and one assistant holds as many of them as it likes. The MCP server keeps a
+registry of attached notebooks, each with its own websocket to its own room, and every
+notebook-scoped tool takes an optional `notebook` argument naming which one to act on; omitted, it
+acts on the *current* notebook — the one most recently attached, changed, or executed. Attaching a
+second notebook leaves the first attached, so work interleaves across several tabs in one session.
+The registry also holds each attachment's Jupyter URL and token, so notebooks on two servers can be
+held at once; a bare path identifies a notebook until two attachments collide, at which point the
+server qualifies it and a still-ambiguous name is refused rather than guessed.
+
 ## Events: human actions only
 
 The extension pushes events when the *human* changes the notebook — never echoes of assistant
@@ -40,6 +49,14 @@ The relay stamps each event with a per-room sequence number and retains the last
 reconnecting assistant declares its last-seen position in the hello and receives exactly what it
 missed; positions count only under the `log_id` they were learned from, so a restarted relay's
 renumbered events are never mistaken for duplicates.
+
+Those sequence numbers are per room, so with several notebooks attached the MCP server merges the
+rooms into one stream of its own: each accepted event is tagged with the notebook it came from and
+numbered under a single cursor, and `poll_events` returns that merged stream in arrival order. The
+two numbering schemes stay separate on purpose — the relay's per-room numbering drives duplicate
+suppression across a reconnect of one socket, while the merged cursor is what a caller pages
+through. The merged log is bounded too, and its 1000 entries are a budget shared across every
+attached notebook rather than a limit per notebook.
 
 ## Capabilities
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from conftest import free_port, wait_until_up
+from repo_assets import jupyter_path_serving_the_repo
 from tornado.websocket import websocket_connect
 
 from nbclassic_mcp_bridge.switchboard import PROTOCOL_VERSION
@@ -99,7 +100,11 @@ def _start_nbclassic(port, nbdir):
             "--ServerApp.jpserver_extensions={'nbclassic_mcp_bridge':True}",
         ],
         cwd=nbdir,
-        env={**os.environ, "JUPYTER_TOKEN": TOKEN},
+        env={
+            **os.environ,
+            "JUPYTER_TOKEN": TOKEN,
+            "JUPYTER_PATH": jupyter_path_serving_the_repo(nbdir),
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
