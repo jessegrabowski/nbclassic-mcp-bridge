@@ -735,6 +735,7 @@ def test_reading_another_notebook_does_not_retarget(monkeypatch, tool_name, kwar
 DISPATCHING_TOOLS = [
     ("read_cell_image", {"cell_id": "c1"}, RuntimeError),
     ("interrupt_kernel", {}, None),
+    ("restart_kernel", {}, None),
 ]
 
 

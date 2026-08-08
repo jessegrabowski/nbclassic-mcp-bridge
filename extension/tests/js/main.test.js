@@ -158,6 +158,75 @@ test("interrupt_kernel reaches the kernel and unknown ops error", () => {
     assert.match(lastReply(socket, 2).error, /unknown op/);
 });
 
+test("restart_kernel waits for the kernel to be usable before replying", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "restart_kernel", args: {} });
+    assert.equal(bridge.notebook.kernel.restarted, true, "the restart must actually be requested");
+    // The POST callback has already fired; replying on it would hand back a kernel that cannot
+    // yet run code.
+    assert.equal(socket.sent.filter((f) => f.kind === "reply").length, 0, "must wait for readiness");
+
+    bridge.events.trigger("kernel_ready.Kernel", {});
+    const reply = lastReply(socket, 1);
+    assert.equal(reply.ok, true);
+    assert.equal(reply.result.status, "restarted");
+});
+
+test("restart_kernel replies once, even if the kernel signals ready again", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "restart_kernel", args: {} });
+    bridge.events.trigger("kernel_ready.Kernel", {});
+    bridge.events.trigger("kernel_ready.Kernel", {});
+
+    // lastReply asserts exactly one; a leaked listener would send a second for the same id.
+    assert.equal(lastReply(socket, 1).ok, true);
+});
+
+test("restart_kernel reports a refused restart", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+    bridge.notebook.kernel.restart = function (success, error) {
+        error();
+    };
+
+    socket.receive({ kind: "cmd", id: 1, op: "restart_kernel", args: {} });
+    const reply = lastReply(socket, 1);
+    assert.equal(reply.ok, false);
+    assert.match(reply.error, /restart request failed/);
+});
+
+test("restart_kernel times out instead of hanging forever", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "restart_kernel", args: { timeout_ms: 5000 } });
+    t.mock.timers.tick(5000);
+
+    const reply = lastReply(socket, 1);
+    assert.equal(reply.ok, false);
+    assert.match(reply.error, /restart timed out/);
+
+    // A late readiness signal must not produce a second reply for the same id.
+    bridge.events.trigger("kernel_ready.Kernel", {});
+    assert.equal(socket.sent.filter((f) => f.kind === "reply" && f.id === 1).length, 1);
+});
+
+test("restart_kernel fails fast when the kernel is not connected", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+    bridge.notebook.kernel.connected = false;
+
+    socket.receive({ kind: "cmd", id: 1, op: "restart_kernel", args: {} });
+    const reply = lastReply(socket, 1);
+    assert.equal(reply.ok, false);
+    assert.match(reply.error, /kernel is not connected/);
+});
+
 test("kernel failures push kernel_status; recovery pushes exactly once", () => {
     const bridge = loadBridge();
     const socket = connect(bridge);

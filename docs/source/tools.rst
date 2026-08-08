@@ -48,6 +48,7 @@ Execution
 .. autofunction:: run_cells
 .. autofunction:: inspect_kernel
 .. autofunction:: interrupt_kernel
+.. autofunction:: restart_kernel
 .. autofunction:: kernel_status
 
 Safety

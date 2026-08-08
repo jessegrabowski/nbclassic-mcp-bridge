@@ -130,11 +130,19 @@ function makeNotebook(events, cells) {
             name: "python3",
             connected: true,
             interrupted: false,
+            restarted: false,
             is_connected() {
                 return this.connected;
             },
             interrupt() {
                 this.interrupted = true;
+            },
+            // Mirrors the real signature: the callbacks report the POST, not readiness, so tests
+            // drive kernel_ready.Kernel themselves to finish a restart.
+            restart(success, error) {
+                this.restarted = true;
+                this.restartError = error;
+                if (success) { success(); }
             },
             execute() {},
         },
