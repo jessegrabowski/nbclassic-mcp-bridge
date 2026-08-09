@@ -602,10 +602,10 @@ async def restart_kernel(timeout_s: float = 60, notebook: str | None = None) -> 
 
     Every variable, import, and definition is destroyed -- use this to clear wedged state or pick
     up an edited module, not to stop a single runaway cell, which ``interrupt_kernel`` does without
-    losing the session. Existing outputs stay on screen and now describe a kernel that no longer
-    exists, so re-run the cells whose results you still need. Returns once the new kernel is ready,
-    so the next ``execute_cell`` will not fail with "kernel is not connected". Default timeout 60.
-    Act on the current notebook unless ``notebook`` names another attached one.
+    losing the session. Existing outputs stay on screen but are now stale, so re-run the cells whose
+    results you still need. Returns once the new kernel is ready, so the next ``execute_cell`` will
+    not fail with "kernel is not connected". Default timeout 60. Act on the current notebook unless
+    ``notebook`` names another attached one.
     """
     client, _ = _target(notebook)
     return await client.command("restart_kernel", {"timeout_ms": int(timeout_s * 1000)})
