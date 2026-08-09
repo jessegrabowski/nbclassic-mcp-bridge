@@ -31,7 +31,7 @@ test("hello carries the protocol version, notebook path, and capabilities", () =
     // The op table is the capability list, so an MCP server talking to an older tab sees an op
     // missing and reports that rather than sending a command nothing will answer.
     for (const op of ["snapshot", "set_source", "execute_cell", "inspect", "undo_last", "reload_notebook",
-                      "open_notebook"]) {
+                      "open_notebook", "restart_kernel"]) {
         assert.ok(hello.capabilities.includes(op), `capabilities must include ${op}`);
     }
 });
@@ -171,7 +171,7 @@ test("restart_kernel waits for the kernel to be usable before replying", () => {
     bridge.events.trigger("kernel_ready.Kernel", {});
     const reply = lastReply(socket, 1);
     assert.equal(reply.ok, true);
-    assert.equal(reply.result.status, "restarted");
+    assert.deepEqual(reply.result, { status: "restarted", kernel_name: "python3" });
 });
 
 test("restart_kernel replies once, even if the kernel signals ready again", () => {
@@ -214,6 +214,21 @@ test("restart_kernel times out instead of hanging forever", (t) => {
     // A late readiness signal must not produce a second reply for the same id.
     bridge.events.trigger("kernel_ready.Kernel", {});
     assert.equal(socket.sent.filter((f) => f.kind === "reply" && f.id === 1).length, 1);
+});
+
+test("restart_kernel falls back to the default timeout when the caller omits one", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "restart_kernel", args: {} });
+    // Losing the fallback would leave setTimeout with an undefined delay, which fires on the next
+    // tick and reports every restart as timed out before the kernel has had a chance to come back.
+    t.mock.timers.tick(59000);
+    assert.equal(socket.sent.filter((f) => f.kind === "reply").length, 0, "must still be waiting");
+
+    t.mock.timers.tick(1000);
+    assert.match(lastReply(socket, 1).error, /restart timed out/);
 });
 
 test("restart_kernel fails fast when the kernel is not connected", () => {

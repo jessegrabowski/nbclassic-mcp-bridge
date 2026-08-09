@@ -739,6 +739,25 @@ DISPATCHING_TOOLS = [
 ]
 
 
+@pytest.mark.parametrize("timeout_s, expected_ms", [(None, 60000), (5, 5000), (0.25, 250)])
+def test_restart_kernel_sends_its_timeout_in_milliseconds(monkeypatch, timeout_s, expected_ms):
+    # The extension reads timeout_ms, so dropping the conversion would ask for a 60 millisecond
+    # restart and report every restart as timed out. No e2e test covers this: those drive the wire
+    # op directly and never run the tool function.
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
+        await server.restart_kernel(**kwargs)
+
+    asyncio.run(scenario())
+
+    op, args = _clients_by_path(registry)["nb/a.ipynb"].commands[-1]
+    assert op == "restart_kernel"
+    assert args == {"timeout_ms": expected_ms}
+
+
 @pytest.mark.parametrize(
     "tool_name, kwargs, expected_error", DISPATCHING_TOOLS, ids=[name for name, _, _ in DISPATCHING_TOOLS]
 )

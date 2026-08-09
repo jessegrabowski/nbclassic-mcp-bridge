@@ -139,9 +139,8 @@ function makeNotebook(events, cells) {
             },
             // Mirrors the real signature: the callbacks report the POST, not readiness, so tests
             // drive kernel_ready.Kernel themselves to finish a restart.
-            restart(success, error) {
+            restart(success) {
                 this.restarted = true;
-                this.restartError = error;
                 if (success) { success(); }
             },
             execute() {},
