@@ -57,6 +57,7 @@ focus, so the tab the human is actually using holds the bridge.
 | `inspect`      | `{code, timeout_ms?}`                         | `{status, outputs}` — runs in the kernel with `store_history: false`; no cell is touched |
 | `run_cells`    | `{cell_ids, timeout_ms?}`                     | `{results}` — per-cell `{cell_id, outputs}` in request order; executes queue FIFO like Run All, and unfinished cells are marked `"timed out"` |
 | `interrupt_kernel` | `{}`                                      | `{status}` |
+| `restart_kernel` | `{timeout_ms?}`                             | `{status, kernel_name}` — replies once the new kernel is ready, not when the restart is requested; in-flight `execute_cell`/`run_cells` commands lose their kernel and fail on their own timeouts |
 | `kernel_info`  | `{}`                                          | `{state, connected, kernel_name}` |
 | `undo_last`    | `{}`                                          | `{status, undid?, reason?}` — reverts the newest recorded mcp mutation; skipped if the human touched that cell since |
 | `undo_all`     | `{}`                                          | `{results}` — one `undo_last` result per entry, newest first |

@@ -456,6 +456,55 @@ def test_interrupt_kernel_stops_a_running_cell(nbclassic_port):
     asyncio.run(scenario())
 
 
+def test_restart_kernel_clears_state_and_replies_only_when_usable(nbclassic_port):
+    # Uses its own notebook so discarding the kernel cannot disturb tests sharing the seed notebook.
+    async def scenario():
+        target = "restarted.ipynb"
+        body = json.dumps({"type": "notebook", "format": "json", "content": _SEED_NOTEBOOK})
+        request = urllib.request.Request(
+            f"http://localhost:{nbclassic_port}/api/contents/{target}?token={TOKEN}",
+            data=body.encode(),
+            method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=5)
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            ws = await websocket_connect(f"ws://localhost:{nbclassic_port}/mcp-bridge?token={TOKEN}")
+            ws.write_message(
+                json.dumps({"kind": "hello", "protocol": PROTOCOL_VERSION, "role": "mcp", "notebook": target})
+            )
+            mcp = McpPeer(ws)
+            try:
+                await page.goto(f"http://localhost:{nbclassic_port}/notebooks/{target}?token={TOKEN}")
+                await mcp.recv_until(_extension_joined)
+                await _wait_for_live_kernel(page, nbclassic_port)
+
+                seeded = await mcp.command("inspect", {"code": "marker = 42; print(marker)"}, timeout=60)
+                assert seeded["status"] == "ok", seeded
+                assert "42" in json.dumps(seeded["outputs"])
+
+                result = await mcp.command("restart_kernel", {}, timeout=60)
+                assert result["status"] == "restarted"
+
+                # The point of waiting for kernel_ready rather than the restart POST: the very next
+                # command must land on a usable kernel, with no retry loop and no fail-fast error.
+                revived = await mcp.command("inspect", {"code": "print('alive')"}, timeout=60)
+                assert revived["status"] == "ok", revived
+                assert "alive" in json.dumps(revived["outputs"])
+
+                # A restart the kernel merely acknowledged would still hold the old namespace.
+                cleared = await mcp.command("inspect", {"code": "print('marker' in dir())"}, timeout=60)
+                assert "False" in json.dumps(cleared["outputs"]), cleared
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_dead_kernel_fails_fast_and_pushes_kernel_status(nbclassic_port):
     # Uses its own notebook so killing the kernel cannot disturb tests sharing the seed notebook.
     async def scenario():

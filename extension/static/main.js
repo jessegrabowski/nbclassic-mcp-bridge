@@ -11,6 +11,7 @@ define([
     var SOURCE_DEBOUNCE_MS = 400;
     var EXECUTE_TIMEOUT_MS = 120000;
     var INSPECT_TIMEOUT_MS = 30000;
+    var RESTART_TIMEOUT_MS = 60000;
     var UNDO_STACK_MAXLEN = 50;
     var RECONNECT_MIN_MS = 2000;
     var RECONNECT_MAX_MS = 30000;
@@ -297,6 +298,10 @@ define([
             requireLiveKernel().interrupt();
             return { status: "interrupt requested" };
         },
+        restart_kernel: function (args, id) {
+            restartKernel(id, args.timeout_ms);
+            return DEFERRED;
+        },
         kernel_info: function () {
             var kernel = Jupyter.notebook.kernel;
             return {
@@ -537,6 +542,50 @@ define([
             // second, bogus "timed out" reply for the same id.
             done = true;
             clearTimeout(timer);
+            throw e;
+        }
+    }
+
+    // The restart POST returns as soon as the server accepts it, long before the kernel can run
+    // code again, so settling on it would hand back a kernel that fails the next execute_cell.
+    // kernel_ready fires once the new kernel is connected and has answered kernel_info, which is
+    // exactly the condition the caller is waiting for.
+    function restartKernel(id, timeoutMs) {
+        var kernel = requireLiveKernel();
+        var done = false;
+        function cleanup() {
+            done = true;
+            clearTimeout(timer);
+            events.off("kernel_ready.Kernel", onReady);
+        }
+        function settle(frame) {
+            if (done) { return; }
+            cleanup();
+            sendFrame(frame);
+        }
+        var timer = setTimeout(function () {
+            settle({ kind: "reply", id: id, ok: false,
+                     error: "restart timed out (state: " + kernelState + ")" });
+        }, timeoutMs > 0 ? timeoutMs : RESTART_TIMEOUT_MS);
+        function onReady() {
+            // The pre-restart reference names the kernel that was just discarded, not the one that
+            // replaced it.
+            var live = Jupyter.notebook.kernel;
+            settle({ kind: "reply", id: id, ok: true,
+                     result: { status: "restarted", kernel_name: live ? live.name : null } });
+        }
+        events.on("kernel_ready.Kernel", onReady);
+        // In-flight execute_cell/run_cells replies are deliberately left to their own timeouts: the
+        // restart kills their kernel, but their pendingExecutes bookkeeping belongs to them, and
+        // resolving them from here would race their own onFinished handlers.
+        try {
+            kernel.restart(null, function () {
+                settle({ kind: "reply", id: id, ok: false, error: "restart request failed" });
+            });
+        } catch (e) {
+            // applyCommand sends the failure reply; cleanup only stops the timer from sending a
+            // second one.
+            cleanup();
             throw e;
         }
     }
