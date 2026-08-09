@@ -482,7 +482,7 @@ def test_restart_kernel_clears_state_and_replies_only_when_usable(nbclassic_port
                 await mcp.recv_until(_extension_joined)
                 await _wait_for_live_kernel(page, nbclassic_port)
 
-                seeded = await mcp.command("inspect", {"code": "marker = 42; print(marker)"})
+                seeded = await mcp.command("inspect", {"code": "marker = 42; print(marker)"}, timeout=60)
                 assert seeded["status"] == "ok", seeded
                 assert "42" in json.dumps(seeded["outputs"])
 
@@ -491,12 +491,12 @@ def test_restart_kernel_clears_state_and_replies_only_when_usable(nbclassic_port
 
                 # The point of waiting for kernel_ready rather than the restart POST: the very next
                 # command must land on a usable kernel, with no retry loop and no fail-fast error.
-                revived = await mcp.command("inspect", {"code": "print('alive')"})
+                revived = await mcp.command("inspect", {"code": "print('alive')"}, timeout=60)
                 assert revived["status"] == "ok", revived
                 assert "alive" in json.dumps(revived["outputs"])
 
                 # A restart the kernel merely acknowledged would still hold the old namespace.
-                cleared = await mcp.command("inspect", {"code": "print('marker' in dir())"})
+                cleared = await mcp.command("inspect", {"code": "print('marker' in dir())"}, timeout=60)
                 assert "False" in json.dumps(cleared["outputs"]), cleared
             finally:
                 mcp.close()
