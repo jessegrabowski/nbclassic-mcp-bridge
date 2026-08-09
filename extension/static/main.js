@@ -553,11 +553,14 @@ define([
     function restartKernel(id, timeoutMs) {
         var kernel = requireLiveKernel();
         var done = false;
-        function settle(frame) {
-            if (done) { return; }
+        function cleanup() {
             done = true;
             clearTimeout(timer);
             events.off("kernel_ready.Kernel", onReady);
+        }
+        function settle(frame) {
+            if (done) { return; }
+            cleanup();
             sendFrame(frame);
         }
         var timer = setTimeout(function () {
@@ -565,8 +568,8 @@ define([
                      error: "restart timed out (state: " + kernelState + ")" });
         }, timeoutMs > 0 ? timeoutMs : RESTART_TIMEOUT_MS);
         function onReady() {
-            // Read the kernel back rather than reusing the pre-restart reference: a name reported
-            // from the object that was just discarded would be a guess about the one that replaced it.
+            // The pre-restart reference names the kernel that was just discarded, not the one that
+            // replaced it.
             var live = Jupyter.notebook.kernel;
             settle({ kind: "reply", id: id, ok: true,
                      result: { status: "restarted", kernel_name: live ? live.name : null } });
@@ -580,9 +583,9 @@ define([
                 settle({ kind: "reply", id: id, ok: false, error: "restart request failed" });
             });
         } catch (e) {
-            done = true;
-            clearTimeout(timer);
-            events.off("kernel_ready.Kernel", onReady);
+            // applyCommand sends the failure reply; cleanup only stops the timer from sending a
+            // second one.
+            cleanup();
             throw e;
         }
     }
