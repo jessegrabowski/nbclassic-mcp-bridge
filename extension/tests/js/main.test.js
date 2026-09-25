@@ -135,6 +135,31 @@ test("an ordinary disconnect reconnects on backoff", (t) => {
     assert.ok(bridge.sockets.length > 1, "expected a reconnect attempt");
 });
 
+test("a rename rejoins at once under the new path", (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    bridge.notebook.notebook_path = "renamed.ipynb";
+    bridge.events.trigger("notebook_renamed.Notebook", {});
+    assert.equal(socket.readyState, 3);
+    assert.equal(bridge.sockets.length, 2);
+
+    bridge.sockets[1].open();
+    assert.equal(bridge.sockets[1].sent[0].notebook, "renamed.ipynb");
+    t.mock.timers.tick(120000);
+    assert.equal(bridge.sockets.length, 2, "the stale socket's close must not schedule another connect");
+});
+
+test("a rename in an evicted tab does not reconnect and evict the owner", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+    socket.close(1001, "replaced by a newer connection");
+
+    bridge.events.trigger("notebook_renamed.Notebook", {});
+    assert.equal(bridge.sockets.length, 1);
+});
+
 test("execute fails fast when the kernel is not connected", () => {
     const bridge = loadBridge();
     const socket = connect(bridge);

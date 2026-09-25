@@ -664,6 +664,20 @@ define([
         if (evicted && ws === null) { connect(); }
     }
 
+    // Rooms are keyed by the path sent in the hello, so a rename (or Save As, which fires the same
+    // event) must rejoin under the new path. The old socket's handlers are detached first: its close
+    // would otherwise null out the new socket and schedule a second connect. A tab without a socket
+    // sends the new path whenever it next connects.
+    function rejoinAfterRename() {
+        if (ws === null) { return; }
+        var stale = ws;
+        stale.onopen = stale.onmessage = stale.onclose = null;
+        stale.close(1000, "notebook renamed");
+        ws = null;
+        assistantConnected = false;
+        connect();
+    }
+
 
     function flushDirty() {
         if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
@@ -681,6 +695,7 @@ define([
     }
 
     function wireEvents() {
+        events.on("notebook_renamed.Notebook", rejoinAfterRename);
         events.on("create.Cell", function (evt, data) {
             if (applying || reloading) { return; }
             emit("cell_created", {
