@@ -139,6 +139,21 @@ def _extension_joined(frame):
     return frame.get("kind") == "status" and frame.get("peer") == "extension" and frame.get("state") == "joined"
 
 
+def _rooms(port):
+    with urllib.request.urlopen(f"http://localhost:{port}/mcp-bridge/rooms?token={TOKEN}", timeout=5) as response:
+        return json.loads(response.read())["rooms"]
+
+
+async def _wait_for_rooms(port, condition, timeout):
+    """Return True once ``condition(rooms)`` holds, False if ``timeout`` passes first."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if condition(_rooms(port)):
+            return True
+        await asyncio.sleep(0.25)
+    return False
+
+
 class McpPeer:
     """The MCP-side peer of the relay -- lets the test issue cmds and read events."""
 
@@ -738,6 +753,50 @@ def test_human_edits_surface_as_events(nbclassic_port):
                 assert moved["data"]["index"] == 1
             finally:
                 mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_new_notebook_stays_bridged_after_the_human_renames_it(nbclassic_port):
+    async def scenario():
+        # The tree view's New button: an empty notebook the server names Untitled*.ipynb.
+        request = urllib.request.Request(
+            f"http://localhost:{nbclassic_port}/api/contents?token={TOKEN}",
+            data=json.dumps({"type": "notebook"}).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            untitled = json.loads(response.read())["path"]
+        renamed = "renamed_by_human.ipynb"
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            try:
+                await page.goto(f"http://localhost:{nbclassic_port}/notebooks/{untitled}?token={TOKEN}")
+                joined = await _wait_for_rooms(
+                    nbclassic_port, lambda rooms: "extension" in rooms.get(untitled, []), timeout=20
+                )
+                assert joined, _rooms(nbclassic_port)
+
+                await page.evaluate("(name) => Jupyter.notebook.rename(name)", renamed)
+                await page.wait_for_function(
+                    "(name) => Jupyter.notebook.notebook_path === name",
+                    arg=renamed,
+                    timeout=10000,
+                )
+
+                # The old room's teardown and the new room's join arrive on separate sockets, in
+                # either order, so wait for both rather than checking the old room once.
+                moved = await _wait_for_rooms(
+                    nbclassic_port,
+                    lambda rooms: "extension" in rooms.get(renamed, []) and untitled not in rooms,
+                    timeout=10,
+                )
+                assert moved, _rooms(nbclassic_port)
+            finally:
                 await browser.close()
 
     asyncio.run(scenario())
