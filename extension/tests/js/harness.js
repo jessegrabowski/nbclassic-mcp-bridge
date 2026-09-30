@@ -1,18 +1,55 @@
 // Loads static/main.js under node by faking its AMD environment: a chainable jQuery stub, a
-// jQuery-style event bus, a scriptable Jupyter.notebook, and a capturing WebSocket. Everything a
-// test needs comes back from loadBridge().
+// jQuery-style event bus, a scriptable Jupyter.notebook, a capturing WebSocket, and a window with
+// localStorage. Everything a test needs comes back from loadBridge().
 "use strict";
 const path = require("node:path");
 
 const MAIN_JS = path.join(__dirname, "..", "..", "static", "main.js");
 
-function chainableStub() {
-    const stub = {};
-    for (const method of ["attr", "find", "css", "text", "appendTo", "append", "on", "removeClass", "addClass"]) {
+function chainableStub(markup) {
+    const stub = { markup: markup, handlers: {} };
+    for (const method of ["attr", "find", "css", "text", "appendTo", "append", "removeClass", "addClass",
+                          "toggleClass"]) {
         stub[method] = () => stub;
     }
+    stub.on = (name, handler) => {
+        stub.handlers[name] = handler;
+        return stub;
+    };
     stub.length = 0;
     return stub;
+}
+
+// Records scrollIntoView calls on the cell so tests can see follow mode move the viewport.
+function fakeElement(cell) {
+    const element = { length: 1, removeClass: () => element, addClass: () => element };
+    element[0] = {
+        offsetWidth: 0,
+        scrollIntoView(options) {
+            cell.scrolls.push(options);
+        },
+    };
+    return element;
+}
+
+// storage: an object seeding localStorage, or null for a browser that throws on any access.
+function fakeWindow(storage, popups) {
+    const store = new Map(Object.entries(storage || {}));
+    const fake = {
+        location: { protocol: "http:", host: "localhost:8888" },
+        addEventListener() {},
+        open(url, target) {
+            popups.opened.push({ url: url, target: target });
+            return popups.blocked ? null : { closed: popups.stubbed };
+        },
+    };
+    Object.defineProperty(fake, "localStorage", {
+        get() {
+            if (storage === null) { throw new Error("storage disabled"); }
+            return { getItem: (key) => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) };
+        },
+    });
+    return { window: fake, store: store };
 }
 
 class FakeEvents {
@@ -88,7 +125,7 @@ function makeCell(id, source, options = {}) {
         rendered: options.rendered || false,
         _text: source,
         outputs: options.outputs || [],
-        element: null,
+        scrolls: [],
         get_text() {
             return this._text;
         },
@@ -117,6 +154,7 @@ function makeCell(id, source, options = {}) {
             },
         },
     };
+    cell.element = fakeElement(cell);
     return cell;
 }
 
@@ -174,7 +212,7 @@ function makeNotebook(events, cells) {
     return notebook;
 }
 
-function loadBridge(seed = [["c1", "print(1)"], ["c2", "print(2)"]]) {
+function loadBridge(seed = [["c1", "print(1)"], ["c2", "print(2)"]], { storage = {} } = {}) {
     const events = new FakeEvents();
     const cells = seed.map(([id, source, options]) => {
         const cell = makeCell(id, source, options);
@@ -190,24 +228,31 @@ function loadBridge(seed = [["c1", "print(1)"], ["c2", "print(2)"]]) {
     // null rather than throwing; popups.stubbed is what some content blockers do instead, handing
     // back a window that is already closed.
     const popups = { blocked: false, stubbed: false, opened: [] };
-    global.window = {
-        location: { protocol: "http:", host: "localhost:8888" },
-        addEventListener() {},
-        open(url, target) {
-            popups.opened.push({ url: url, target: target });
-            return popups.blocked ? null : { closed: popups.stubbed };
-        },
-    };
+    const browser = fakeWindow(storage, popups);
+    global.window = browser.window;
     global.document = { addEventListener() {}, hidden: false };
+    const elements = [];
     let bridge;
     global.define = (deps, factory) => {
-        bridge = factory(() => chainableStub(), jupyter, events);
+        bridge = factory((markup) => {
+            const stub = chainableStub(markup);
+            elements.push(stub);
+            return stub;
+        }, jupyter, events);
+    };
+    // Clicks the toolbar button whose markup contains the given fragment, e.g. its icon class.
+    const click = (fragment) => {
+        const button = elements.find((stub) => typeof stub.markup === "string" && stub.markup.includes(fragment)
+                                               && stub.handlers.click);
+        if (!button) { throw new Error(`no clickable toolbar button matches ${fragment}`); }
+        button.handlers.click();
     };
 
     delete require.cache[require.resolve(MAIN_JS)];
     require(MAIN_JS);
     bridge.load_ipython_extension();
-    return { events: events, notebook: notebook, cells: cells, sockets: FakeWebSocket.instances, popups: popups };
+    return { events: events, notebook: notebook, cells: cells, sockets: FakeWebSocket.instances, popups: popups,
+             storage: browser.store, click: click };
 }
 
 module.exports = { loadBridge: loadBridge, makeCell: makeCell, FakeWebSocket: FakeWebSocket };
