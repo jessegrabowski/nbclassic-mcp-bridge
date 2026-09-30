@@ -52,6 +52,18 @@ test("snapshot returns every cell; summary mode swaps outputs for summaries", ()
     assert.deepEqual(summary.output_summary, [{ output_type: "stream", name: "stdout", chars: 3 }]);
 });
 
+test("snapshot and read_cell report each cell's position in the notebook", () => {
+    const bridge = loadBridge([["c1", "a"], ["c2", "b"], ["c3", "c"]]);
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "snapshot", args: {} });
+    const cells = lastReply(socket, 1).result;
+    assert.deepEqual(cells.map((cell) => [cell.cell_id, cell.index]), [["c1", 0], ["c2", 1], ["c3", 2]]);
+
+    socket.receive({ kind: "cmd", id: 2, op: "read_cell", args: { cell_id: "c3" } });
+    assert.equal(lastReply(socket, 2).result.index, 2);
+});
+
 test("set_source writes unfocused cells and skips the cell the human is editing", () => {
     const bridge = loadBridge();
     const socket = connect(bridge);
