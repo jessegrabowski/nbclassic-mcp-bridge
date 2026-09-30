@@ -73,10 +73,12 @@ define([
         return cell.output_area ? cell.output_area.toJSON() : [];
     }
 
-    function cellToProto(cell) {
+    // find_cell_index scans every cell element without short-circuiting, so callers walking the
+    // whole notebook must pass the index they already have or the walk turns quadratic.
+    function cellToProto(cell, index) {
         return {
             cell_id: cell.id,
-            index: Jupyter.notebook.find_cell_index(cell),
+            index: index === undefined ? Jupyter.notebook.find_cell_index(cell) : index,
             cell_type: cell.cell_type,
             source: cell.get_text(),
             outputs: cellOutputs(cell),
@@ -236,7 +238,9 @@ define([
     // is what makes the op callable, so the two can never drift apart.
     var OPS = {
         snapshot: function (args) {
-            var cells = Jupyter.notebook.get_cells().map(cellToProto);
+            var cells = Jupyter.notebook.get_cells().map(function (cell, index) {
+                return cellToProto(cell, index);
+            });
             if (args.outputs === "summary") {
                 cells.forEach(function (cell) {
                     cell.output_summary = cell.outputs.map(summarizeOutput);
