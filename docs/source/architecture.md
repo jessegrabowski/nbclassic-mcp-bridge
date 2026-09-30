@@ -86,7 +86,7 @@ the notebook.
 The human's tab renders a toolbar control showing bridge state (assistant connected / ready /
 paused / disconnected) that doubles as a pause toggle: while paused, every command is rejected
 with a distinct error and no edit events leave the browser. Cells the assistant touches flash
-briefly. Authentication rides on the Jupyter token: the websocket and every HTTP call the MCP
+briefly, and an opt-in follow mode scrolls each one into view unless the human is in edit mode. Authentication rides on the Jupyter token: the websocket and every HTTP call the MCP
 server makes carry it, with HTTP using an `Authorization` header so the token can never leak into
 URL-bearing error messages.
 

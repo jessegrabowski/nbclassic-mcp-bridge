@@ -577,3 +577,73 @@ test("a mid-dispatch execute failure yields exactly one reply and leaks nothing"
     bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[0] });
     assert.equal(eventsSent(socket, "cell_executed").length, 1);
 });
+
+test("the follow toggle starts off and switches scrolling on and back off", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "set_source", args: { cell_id: "c1", source: "a" } });
+    assert.deepEqual(bridge.cells[0].scrolls, []);
+
+    bridge.click("fa-crosshairs");
+    assert.equal(bridge.storage.get("nbclassic-mcp-bridge.follow"), "on");
+    socket.receive({ kind: "cmd", id: 2, op: "set_source", args: { cell_id: "c2", source: "b" } });
+    assert.deepEqual(bridge.cells[1].scrolls, [{ block: "nearest", behavior: "smooth" }]);
+
+    bridge.click("fa-crosshairs");
+    assert.equal(bridge.storage.get("nbclassic-mcp-bridge.follow"), "off");
+    socket.receive({ kind: "cmd", id: 3, op: "set_source", args: { cell_id: "c2", source: "c" } });
+    assert.equal(bridge.cells[1].scrolls.length, 1);
+});
+
+test("follow mode holds the viewport still while the human is editing a cell", () => {
+    const bridge = loadBridge(undefined, { storage: { "nbclassic-mcp-bridge.follow": "on" } });
+    const socket = connect(bridge);
+
+    bridge.events.trigger("edit_mode.Cell", { cell: bridge.cells[0] });
+    socket.receive({ kind: "cmd", id: 1, op: "set_source", args: { cell_id: "c2", source: "b" } });
+    assert.deepEqual(bridge.cells[1].scrolls, []);
+
+    bridge.events.trigger("command_mode.Cell", {});
+    socket.receive({ kind: "cmd", id: 2, op: "set_source", args: { cell_id: "c2", source: "c" } });
+    assert.equal(bridge.cells[1].scrolls.length, 1);
+});
+
+test("follow mode tracks a run_cells batch cell by cell as the kernel works through it", () => {
+    const bridge = loadBridge([["c1", "a"], ["c2", "b"], ["c3", "c"]],
+                              { storage: { "nbclassic-mcp-bridge.follow": "on" } });
+    const socket = connect(bridge);
+    const scrollCounts = () => bridge.cells.map((cell) => cell.scrolls.length);
+
+    socket.receive({ kind: "cmd", id: 1, op: "run_cells", args: { cell_ids: ["c1", "c2", "c3"] } });
+    assert.deepEqual(scrollCounts(), [1, 0, 0]);
+
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[0] });
+    assert.deepEqual(scrollCounts(), [1, 1, 0]);
+
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[1] });
+    bridge.events.trigger("finished_execute.CodeCell", { cell: bridge.cells[2] });
+    assert.deepEqual(scrollCounts(), [1, 1, 2]);
+    assert.equal(lastReply(socket, 1).ok, true);
+});
+
+test("follow mode lands on the last cell of a batch with nothing left to wait for", () => {
+    const bridge = loadBridge([["c1", "# a", { cell_type: "markdown" }], ["c2", "# b", { cell_type: "markdown" }]],
+                              { storage: { "nbclassic-mcp-bridge.follow": "on" } });
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "run_cells", args: { cell_ids: ["c1", "c2"] } });
+    assert.deepEqual(bridge.cells.map((cell) => cell.scrolls.length), [0, 1]);
+
+    socket.receive({ kind: "cmd", id: 2, op: "run_cells", args: { cell_ids: [] } });
+    assert.deepEqual(lastReply(socket, 2).result, { results: [] });
+});
+
+test("follow mode still toggles when browser storage is unavailable", () => {
+    const bridge = loadBridge(undefined, { storage: null });
+    const socket = connect(bridge);
+
+    bridge.click("fa-crosshairs");
+    socket.receive({ kind: "cmd", id: 1, op: "insert_cell", args: { cell_type: "code", index: 0, source: "x" } });
+    assert.equal(bridge.notebook.get_cells()[0].scrolls.length, 1);
+});
