@@ -90,6 +90,10 @@ A plug icon at the right end of the notebook toolbar shows the bridge's state: g
 assistant is connected, orange when paused. Clicking it toggles pause; while paused, every
 assistant command is rejected and none of your edits stream out.
 
+The crosshairs button next to it turns on follow mode: the notebook scrolls to each cell the
+assistant edits or runs. It scrolls only when the cell is off screen, never while you are typing in
+a cell, and never moves your selection. The setting is remembered per browser.
+
 Concurrent edits to the same cell are last-write-wins, which suits one human and one assistant
 taking turns. The one guard: the assistant cannot overwrite the cell you are currently editing.
 
