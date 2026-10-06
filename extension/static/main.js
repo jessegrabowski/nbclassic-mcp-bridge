@@ -15,6 +15,7 @@ define([
     var UNDO_STACK_MAXLEN = 50;
     var RECONNECT_MIN_MS = 2000;
     var RECONNECT_MAX_MS = 30000;
+    var FOLLOW_STORAGE_KEY = "nbclassic-mcp-bridge.follow";
 
     // Close reason the relay sends when another tab takes over this notebook's room; the evicted tab
     // must stand down instead of reconnecting, or the two tabs evict each other forever.
@@ -37,6 +38,7 @@ define([
     var undoStack = [];             // inverses of agent mutations, newest last; see recordUndo
     var reloading = false;          // notebook repopulation in flight; suppress its event storm
     var debounceTimer = null;
+    var following = false;          // human asked the viewport to track the assistant's edits
 
 
     function sendFrame(obj) {
@@ -122,7 +124,7 @@ define([
                 return { status: "skipped", reason: "cell changed since", undid: described };
             }
             writeAgentSource(edited, entry.before);
-            flashCell(edited);
+            markTouched(edited);
             return { status: "undone", undid: described };
         }
         if (entry.op === "insert_cell") {
@@ -140,7 +142,7 @@ define([
             var restored = nb.insert_cell_at_index(entry.cell.cell_type, entry.index);
             restored.fromJSON(entry.cell);
             lastAgentWrite[restored.id] = restored.get_text();
-            flashCell(restored);
+            markTouched(restored);
             return { status: "undone", undid: described };
         }
         if (entry.op === "move_cell") {
@@ -152,7 +154,7 @@ define([
                 return { status: "skipped", reason: "cell moved since", undid: described };
             }
             moveCell(entry.cell_id, entry.from);
-            flashCell(moved);
+            markTouched(moved);
             return { status: "undone", undid: described };
         }
         return { status: "skipped", reason: "unknown entry", undid: described };
@@ -167,6 +169,20 @@ define([
         element.removeClass("mcp-bridge-agent-touch");
         void element[0].offsetWidth; // restart the animation when the same cell is touched twice
         element.addClass("mcp-bridge-agent-touch");
+    }
+
+    // Scrolls only as far as needed to bring the cell into view, and never while the human is typing
+    // in a cell. It also never selects the cell: that would move the human's cursor and shift
+    // focusedCellId, which gates set_source.
+    function followCell(cell) {
+        var element = cell.element;
+        if (!following || focusedCellId !== null || !element || !element.length) { return; }
+        element[0].scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+
+    function markTouched(cell) {
+        flashCell(cell);
+        followCell(cell);
     }
 
     // Payload-free description of one output; mirrors the MCP server's _summarize_output.
@@ -257,7 +273,7 @@ define([
             var created = nb.insert_cell_at_index(args.cell_type, args.index);
             if (!created) { throw new Error("could not insert a " + args.cell_type + " cell"); }
             writeAgentSource(created, args.source || "");
-            flashCell(created);
+            markTouched(created);
             recordUndo({ op: "insert_cell", cell_id: created.id, after: args.source || "" });
             return { cell_id: created.id, index: nb.find_cell_index(created) };
         },
@@ -271,7 +287,7 @@ define([
             recordUndo({ op: "set_source", cell_id: args.cell_id, before: edited.get_text(), after: args.source || "" });
             writeAgentSource(edited, args.source || "");
             if (wasRendered) { edited.render(); }
-            flashCell(edited);
+            markTouched(edited);
             return { cell_id: args.cell_id, status: "written" };
         },
         delete_cell: function (args) {
@@ -373,14 +389,14 @@ define([
         lastAgentWrite[cellId] = moved.get_text();
         // The reinserted cell starts unrendered; keep the view it had.
         if (wasRendered) { moved.render(); }
-        flashCell(moved);
+        markTouched(moved);
         return { cell_id: cellId, index: nb.find_cell_index(moved) };
     }
 
     // execute_cell replies later: the reply waits for finished_execute.CodeCell to carry real outputs.
     function executeCell(cellId, id, timeoutMs) {
         var cell = requireCell(cellId);
-        flashCell(cell);
+        markTouched(cell);
         if (cell.cell_type !== "code") {
             cell.execute();
             sendFrame({ kind: "reply", id: id, ok: true,
@@ -459,10 +475,18 @@ define([
             });
             finish();
         }, timeoutMs > 0 ? timeoutMs : RUN_CELLS_TIMEOUT_MS);
+        // The whole batch is queued at once but the kernel runs it in order, so follow mode tracks
+        // the cell currently running instead of jumping to the last one queued. Markdown cells
+        // render on the spot, so once no code cell is pending the batch's last cell is current.
+        function followRunningCell() {
+            var current = cells.find(function (cell) { return remaining[cell.id]; }) || cells[cells.length - 1];
+            if (current) { followCell(current); }
+        }
         function onFinished(evt, data) {
             if (done || !remaining[data.cell.id]) { return; }
             delete remaining[data.cell.id];
             outputsById[data.cell.id] = cellOutputs(data.cell);
+            followRunningCell();
             if (!Object.keys(remaining).length) { finish(); }
         }
 
@@ -478,6 +502,7 @@ define([
                 flashCell(cell);
                 cell.execute();
             });
+            followRunningCell();
         } catch (e) {
             // applyCommand replies with this error; leaving the timer or handler armed would send
             // a second reply for the same id later.
@@ -846,6 +871,47 @@ define([
         renderStatus();
     }
 
+    // Follow mode is a per-browser view preference. Storage can be unavailable (private windows,
+    // blocked site data); follow mode then still works but resets on reload.
+    function loadFollowPreference() {
+        try {
+            return window.localStorage.getItem(FOLLOW_STORAGE_KEY) === "on";
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveFollowPreference() {
+        try {
+            window.localStorage.setItem(FOLLOW_STORAGE_KEY, following ? "on" : "off");
+        } catch (e) {
+            console.warn("nbclassic-mcp-bridge: could not save the follow preference", e);
+        }
+    }
+
+    function renderFollow() {
+        $("#mcp-bridge-follow button")
+            .toggleClass("active", following)
+            .attr("aria-pressed", String(following))
+            .attr("title", following
+                ? "Following the assistant's edits. Click to stop."
+                : "Click to scroll to each cell the assistant edits.");
+    }
+
+    function onFollowClick() {
+        following = !following;
+        saveFollowPreference();
+        renderFollow();
+    }
+
+    function buildFollowUI() {
+        var button = $('<button class="btn btn-default"><i class="fa fa-crosshairs"></i></button>');
+        button.on("click", onFollowClick);
+        $('<div class="btn-group" id="mcp-bridge-follow"></div>').append(button)
+            .appendTo(Jupyter.toolbar.element);
+        renderFollow();
+    }
+
     // nbclassic moves cells by raw DOM reordering with no notebook event, so wrap the prototype's move
     // methods (toolbar, menu, and keyboard all funnel through them) and diff indices into cell_moved
     // events. The instance is sealed, hence the prototype; mcp move_cell uses delete+insert and never
@@ -870,6 +936,7 @@ define([
     }
 
     function init() {
+        following = loadFollowPreference();
         connect();
         wireEvents();
         wireKernelEvents();
@@ -880,8 +947,9 @@ define([
         }
         try {
             buildStatusUI();
+            buildFollowUI();
         } catch (e) {
-            console.warn("nbclassic-mcp-bridge: could not build the toolbar status control", e);
+            console.warn("nbclassic-mcp-bridge: could not build the toolbar controls", e);
         }
         window.addEventListener("focus", reclaimEvicted);
         document.addEventListener("visibilitychange", function () {
