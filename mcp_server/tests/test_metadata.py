@@ -70,6 +70,7 @@ def test_outline_previews_the_first_nonblank_line_and_shortens_long_ones():
         ("cell", {"raw_mimetype": "text/x-custom"}),
         ("notebook", {"rise": {"theme": "night", "width": 1280, "slideNumber": "c/t"}}),
         ("notebook", {"authors": [{"name": "A"}], "rise": {"chalkboard": {"theme": "whiteboard"}}}),
+        ("cell", {"my.extension": {"enabled": True}}),
     ],
 )
 def test_validate_accepts_known_values_deletions_and_unknown_keys(scope, patch):
@@ -85,6 +86,8 @@ def test_validate_accepts_known_values_deletions_and_unknown_keys(scope, patch):
         ("cell", {"editable": "false"}, "editable must be boolean"),
         ("notebook", {"rise": {"transition": "wipe"}}, "rise.transition must be one of"),
         ("notebook", {"authors": ["A"]}, "authors must be list of {name: string}"),
+        ("cell", {"slideshow.slide_type": "slide"}, '{"slideshow": {"slide_type": ...}}'),
+        ("notebook", {"rise.theme": None}, "'rise.theme' would be stored as one literal key"),
     ],
 )
 def test_validate_rejects_bad_values_and_names_the_choices(scope, patch, message):

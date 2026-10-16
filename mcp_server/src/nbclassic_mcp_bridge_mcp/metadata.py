@@ -179,17 +179,29 @@ _TYPE_CHECKS: dict[str, Callable[[object], bool]] = {
 }
 
 
-def _patch_nodes(patch: dict, prefix: str = "") -> Iterator[tuple[str, object]]:
-    """Yield every key a merge patch sets, nested ones included, as (dotted path, value)."""
+def _patch_nodes(patch: dict, prefix: str = "") -> Iterator[tuple[str, str, object]]:
+    """Yield every key a merge patch sets, nested ones included, as (dotted path, key, value)."""
     for key, value in patch.items():
         path = prefix + key
-        yield path, value
+        yield path, key, value
         if isinstance(value, dict):
             yield from _patch_nodes(value, prefix=path + ".")
 
 
-def _check_node(path: str, value: object, entries: dict) -> str | None:
+def _nested_form(key: str) -> str:
+    segments = key.split(".")
+    return "".join(f'{{"{segment}": ' for segment in segments) + "..." + "}" * len(segments)
+
+
+def _check_node(path: str, key: str, value: object, entries: dict) -> str | None:
     """Describe what is wrong with one patched key, or return None when it is acceptable."""
+    children = sorted(known for known in entries if known.startswith(path + "."))
+    # The catalog names keys by dotted path, but metadata stores "a.b" as one literal key that
+    # no reader looks up, so writing or deleting it would do nothing.
+    if "." in key and (path in entries or children):
+        return f"{key!r} would be stored as one literal key that nothing reads; nest it as {_nested_form(key)}"
+    if value is None:
+        return None
     entry = entries.get(path)
     if entry is not None:
         if not _TYPE_CHECKS[entry["type"]](value):
@@ -197,7 +209,6 @@ def _check_node(path: str, value: object, entries: dict) -> str | None:
         if "choices" in entry and value not in entry["choices"]:
             return f"{path} must be one of {', '.join(entry['choices'])}; got {value!r}"
         return None
-    children = sorted(known for known in entries if known.startswith(path + "."))
     if children and not isinstance(value, dict):
         return f"{path} must be an object (holding {', '.join(children)}), got {value!r}"
     return None
@@ -206,8 +217,9 @@ def _check_node(path: str, value: object, entries: dict) -> str | None:
 def validate_patch(patch: dict, scope: str) -> None:
     """Reject a merge patch that sets a catalogued key to a value its reader does not accept.
 
-    Keys outside the catalog pass untouched, and a ``None`` value deletes a key, so it is always
-    accepted.
+    Keys outside the catalog pass untouched, and a ``None`` value deleting a properly nested key
+    is always accepted. A literal dotted key such as ``"slideshow.slide_type"`` is rejected when
+    it spells a catalogued path, because readers look up the nested form.
 
     Parameters
     ----------
@@ -219,8 +231,8 @@ def validate_patch(patch: dict, scope: str) -> None:
     entries = CATALOG[scope]
     problems = [
         problem
-        for path, value in _patch_nodes(patch)
-        if value is not None and (problem := _check_node(path=path, value=value, entries=entries)) is not None
+        for path, key, value in _patch_nodes(patch)
+        if (problem := _check_node(path=path, key=key, value=value, entries=entries)) is not None
     ]
     if problems:
         raise ValueError("; ".join(problems) + " (see metadata_choices)")
