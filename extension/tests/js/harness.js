@@ -124,6 +124,7 @@ function makeCell(id, source, options = {}) {
         cell_type: options.cell_type || "code",
         rendered: options.rendered || false,
         _text: source,
+        metadata: options.metadata || {},
         outputs: options.outputs || [],
         scrolls: [],
         get_text() {
@@ -183,8 +184,12 @@ function makeNotebook(events, cells) {
             },
             execute() {},
         },
+        dirty: false,
         get_cells() {
             return this.cells;
+        },
+        set_dirty(value) {
+            this.dirty = value;
         },
         find_cell_index(cell) {
             return this.cells.indexOf(cell);

@@ -30,8 +30,8 @@ test("hello carries the protocol version, notebook path, and capabilities", () =
     assert.equal(hello.notebook, "fake.ipynb");
     // The op table is the capability list, so an MCP server talking to an older tab sees an op
     // missing and reports that rather than sending a command nothing will answer.
-    for (const op of ["snapshot", "set_source", "execute_cell", "inspect", "undo_last", "reload_notebook",
-                      "open_notebook", "restart_kernel"]) {
+    for (const op of ["snapshot", "set_source", "set_metadata", "execute_cell", "inspect",
+                      "undo_last", "reload_notebook", "open_notebook", "restart_kernel"]) {
         assert.ok(hello.capabilities.includes(op), `capabilities must include ${op}`);
     }
 });
@@ -76,6 +76,50 @@ test("set_source writes unfocused cells and skips the cell the human is editing"
     socket.receive({ kind: "cmd", id: 2, op: "set_source", args: { cell_id: "c2", source: "clobber" } });
     assert.equal(lastReply(socket, 2).result.status, "skipped");
     assert.equal(bridge.cells[1].get_text(), "print(2)");
+});
+
+test("set_metadata merges the patch, deletes null keys, and replaces lists", () => {
+    const metadata = { slideshow: { slide_type: "slide" }, tags: ["a", "b"], keep: 1 };
+    const bridge = loadBridge([["c1", "x", { metadata }]]);
+    const socket = connect(bridge);
+
+    const patch = { slideshow: { slide_type: "fragment" }, tags: ["c"], keep: null, new: { nested: true } };
+    socket.receive({ kind: "cmd", id: 1, op: "set_metadata", args: { cell_id: "c1", patch } });
+    const expected = { slideshow: { slide_type: "fragment" }, tags: ["c"], new: { nested: true } };
+    assert.deepEqual(lastReply(socket, 1).result, { cell_id: "c1", metadata: expected });
+    assert.deepEqual(bridge.cells[0].metadata, expected);
+    assert.equal(bridge.notebook.dirty, true, "metadata edits fire no change event, so autosave needs the flag");
+    assert.deepEqual(metadata, { slideshow: { slide_type: "slide" }, tags: ["a", "b"], keep: 1 },
+                     "the previous metadata object must survive for undo");
+});
+
+test("set_metadata writes the cell the human is editing and rejects a non-object patch", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    bridge.events.trigger("edit_mode.Cell", { cell: bridge.cells[0] });
+    socket.receive({ kind: "cmd", id: 1, op: "set_metadata", args: { cell_id: "c1", patch: { tags: ["t"] } } });
+    assert.deepEqual(bridge.cells[0].metadata, { tags: ["t"] });
+
+    socket.receive({ kind: "cmd", id: 2, op: "set_metadata", args: { cell_id: "c1", patch: ["t"] } });
+    assert.equal(lastReply(socket, 2).ok, false);
+    assert.deepEqual(bridge.cells[0].metadata, { tags: ["t"] });
+});
+
+test("undo restores metadata unless it changed since", () => {
+    const bridge = loadBridge([["c1", "x", { metadata: { tags: ["orig"] } }], ["c2", "y"]]);
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "set_metadata", args: { cell_id: "c1", patch: { tags: null } } });
+    socket.receive({ kind: "cmd", id: 2, op: "undo_last", args: {} });
+    assert.equal(lastReply(socket, 2).result.status, "undone");
+    assert.deepEqual(bridge.cells[0].metadata, { tags: ["orig"] });
+
+    socket.receive({ kind: "cmd", id: 3, op: "set_metadata", args: { cell_id: "c2", patch: { a: 1 } } });
+    bridge.cells[1].metadata = { a: 2 };
+    socket.receive({ kind: "cmd", id: 4, op: "undo_last", args: {} });
+    assert.match(lastReply(socket, 4).result.reason, /metadata changed since/);
+    assert.deepEqual(bridge.cells[1].metadata, { a: 2 });
 });
 
 test("agent mutations emit no events; human ones do", (t) => {

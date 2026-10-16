@@ -83,8 +83,37 @@ define([
             index: index === undefined ? Jupyter.notebook.find_cell_index(cell) : index,
             cell_type: cell.cell_type,
             source: cell.get_text(),
+            metadata: cell.metadata,
             outputs: cellOutputs(cell),
         };
+    }
+
+    function isPlainObject(value) {
+        return value !== null && typeof value === "object" && !Array.isArray(value);
+    }
+
+    // RFC 7386 JSON merge patch: objects merge key by key, null deletes a key, and anything else
+    // (arrays included) replaces the target value outright. Returns a new value; the target is
+    // never mutated, so the cell's previous metadata survives intact for the undo entry.
+    function mergePatch(target, patch) {
+        if (!isPlainObject(patch)) { return patch; }
+        var result = isPlainObject(target) ? Object.assign({}, target) : {};
+        Object.keys(patch).forEach(function (key) {
+            if (patch[key] === null) {
+                delete result[key];
+            } else {
+                result[key] = mergePatch(result[key], patch[key]);
+            }
+        });
+        return result;
+    }
+
+    // Assigning cell.metadata (rather than mutating it) runs nbclassic's setter, which rebuilds the
+    // cell toolbar so a visible slideshow or tags toolbar shows the new values. Metadata changes
+    // fire no change.Cell, so the notebook must be marked dirty by hand or autosave skips them.
+    function writeAgentMetadata(cell, metadata) {
+        cell.metadata = metadata;
+        Jupyter.notebook.set_dirty(true);
     }
 
     function asText(value) {
@@ -125,6 +154,18 @@ define([
             }
             writeAgentSource(edited, entry.before);
             markTouched(edited);
+            return { status: "undone", undid: described };
+        }
+        if (entry.op === "set_metadata") {
+            var annotated = cellById(entry.cell_id);
+            if (!annotated) {
+                return { status: "skipped", reason: "cell no longer exists", undid: described };
+            }
+            if (JSON.stringify(annotated.metadata) !== entry.after) {
+                return { status: "skipped", reason: "metadata changed since", undid: described };
+            }
+            writeAgentMetadata(annotated, JSON.parse(entry.before));
+            markTouched(annotated);
             return { status: "undone", undid: described };
         }
         if (entry.op === "insert_cell") {
@@ -289,6 +330,18 @@ define([
             if (wasRendered) { edited.render(); }
             markTouched(edited);
             return { cell_id: args.cell_id, status: "written" };
+        },
+        // No focus skip, unlike set_source: metadata never passes through the editor the human is
+        // typing in, so writing it cannot clobber an in-progress edit.
+        set_metadata: function (args) {
+            if (!isPlainObject(args.patch)) { throw new Error("set_metadata needs a patch object"); }
+            var annotated = requireCell(args.cell_id);
+            var merged = mergePatch(annotated.metadata, args.patch);
+            recordUndo({ op: "set_metadata", cell_id: args.cell_id,
+                         before: JSON.stringify(annotated.metadata), after: JSON.stringify(merged) });
+            writeAgentMetadata(annotated, merged);
+            markTouched(annotated);
+            return { cell_id: args.cell_id, metadata: merged };
         },
         delete_cell: function (args) {
             var deleteIndex = indexById(args.cell_id);

@@ -36,6 +36,7 @@ Editing
 
 .. autofunction:: insert_cell
 .. autofunction:: set_cell_source
+.. autofunction:: set_cell_metadata
 .. autofunction:: move_cell
 .. autofunction:: delete_cell
 .. autofunction:: undo_last_change

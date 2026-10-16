@@ -128,18 +128,20 @@ def _outline_cell(cell: dict) -> dict:
         "index": cell.get("index"),
         "cell_type": cell.get("cell_type"),
         "source": _truncate(_as_text(cell.get("source", "")), _SOURCE_CHAR_LIMIT),
+        "metadata": cell.get("metadata", {}),
         "output_summary": summary,
     }
 
 
 def _cell_source_view(cell: dict, full: bool) -> dict:
-    """Project a cell to its source plus id/index/type, dropping outputs."""
+    """Project a cell to its source and metadata plus id/index/type, dropping outputs."""
     source = _as_text(cell.get("source", ""))
     return {
         "cell_id": cell.get("cell_id"),
         "index": cell.get("index"),
         "cell_type": cell.get("cell_type"),
         "source": source if full else _truncate(source, _SOURCE_CHAR_LIMIT),
+        "metadata": cell.get("metadata", {}),
     }
 
 
@@ -457,7 +459,7 @@ async def detach_notebook(notebook: str) -> str:
 
 @mcp.tool()
 async def read_notebook(notebook: str | None = None) -> list[dict]:
-    """List every cell: id, index, type, source, and an output summary.
+    """List every cell: id, index, type, source, metadata, and an output summary.
 
     Source longer than ~16k chars is truncated; outputs are summarized, not included -- call
     ``read_cell_source`` / ``read_cell_output`` for one cell. Act on the current notebook unless
@@ -470,7 +472,7 @@ async def read_notebook(notebook: str | None = None) -> list[dict]:
 
 @mcp.tool()
 async def read_cell_source(cell_id: str, full: bool = False, notebook: str | None = None) -> dict:
-    """Return one cell's source (with its id, index, and type), not its outputs.
+    """Return one cell's source and metadata (with its id, index, and type), not its outputs.
 
     Source longer than ~16k chars is truncated unless ``full`` is true. Act on the current notebook
     unless ``notebook`` names another attached one.
@@ -535,6 +537,20 @@ async def set_cell_source(cell_id: str, source: str, notebook: str | None = None
     """
     client, target = _target(notebook)
     return _echo(await client.command("set_source", {"cell_id": cell_id, "source": source}), target)
+
+
+@mcp.tool()
+async def set_cell_metadata(cell_id: str, patch: dict, notebook: str | None = None) -> dict:
+    """Change a cell's metadata by applying ``patch`` as a JSON merge patch (RFC 7386).
+
+    Nested objects merge key by key, a ``null`` value deletes that key, and any other value (lists
+    included) replaces what was there, so changing ``tags`` means sending the whole new list. Keys
+    the patch does not name are left alone. Returns ``{"cell_id": ..., "metadata": ...}`` with the
+    cell's full metadata after the change. Undoable with ``undo_last_change``. Act on the current
+    notebook unless ``notebook`` names another attached one.
+    """
+    client, target = _target(notebook)
+    return _echo(await client.command("set_metadata", {"cell_id": cell_id, "patch": patch}), target)
 
 
 @mcp.tool()
@@ -646,7 +662,7 @@ async def move_cell(cell_id: str, index: int, notebook: str | None = None) -> di
 
 @mcp.tool()
 async def undo_last_change(notebook: str | None = None) -> dict:
-    """Undo your most recent notebook mutation (set/insert/delete/move; executions are not undoable).
+    """Undo your most recent notebook mutation (source, metadata, insert, delete, move; not executions).
 
     An entry is skipped rather than applied when the human has touched that cell since, so undo can
     never destroy human work; skipped or not, the entry is consumed. Returns what was undone or why

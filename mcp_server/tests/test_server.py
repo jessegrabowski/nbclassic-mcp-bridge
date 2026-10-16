@@ -97,10 +97,12 @@ def test_outline_cell_summarizes_outputs_and_truncates_runaway_source():
         "index": 2,
         "cell_type": "code",
         "source": "print(1)",
+        "metadata": {"slideshow": {"slide_type": "fragment"}},
         "outputs": [{"output_type": "stream", "name": "stdout", "text": "1\n"}],
     }
     outlined = _outline_cell(cell)
     assert outlined["source"] == "print(1)"
+    assert outlined["metadata"] == {"slideshow": {"slide_type": "fragment"}}
     assert "outputs" not in outlined
     assert outlined["output_summary"] == [{"output_type": "stream", "name": "stdout", "chars": 2}]
 
@@ -142,7 +144,7 @@ def test_cell_source_view_returns_source_without_outputs():
         "outputs": [{"output_type": "stream", "text": "1"}],
     }
     view = _cell_source_view(cell, full=False)
-    assert view == {"cell_id": "c1", "index": 3, "cell_type": "code", "source": "print(1)"}
+    assert view == {"cell_id": "c1", "index": 3, "cell_type": "code", "source": "print(1)", "metadata": {}}
     assert "outputs" not in view
 
 
@@ -680,6 +682,7 @@ def test_every_notebook_scoped_tool_accepts_a_target():
 ECHOING_TOOLS = [
     ("insert_cell", {"index": 0, "cell_type": "code", "source": "x"}),
     ("set_cell_source", {"cell_id": "c1", "source": "x"}),
+    ("set_cell_metadata", {"cell_id": "c1", "patch": {"tags": ["x"]}}),
     ("delete_cell", {"cell_id": "c1"}),
     ("move_cell", {"cell_id": "c1", "index": 1}),
     ("execute_cell", {"cell_id": "c1"}),
@@ -1067,3 +1070,4 @@ def test_restore_without_a_checkpoint_gives_an_actionable_error(monkeypatch):
     monkeypatch.setattr(server.discovery, "list_checkpoints", no_checkpoints)
     with pytest.raises(RuntimeError, match="checkpoint_notebook first"):
         asyncio.run(server.restore_notebook_checkpoint())
+
