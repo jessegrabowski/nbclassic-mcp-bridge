@@ -30,12 +30,16 @@ Reading
 .. autofunction:: read_cell_source
 .. autofunction:: read_cell_output
 .. autofunction:: read_cell_image
+.. autofunction:: slide_outline
 
 Editing
 -------
 
 .. autofunction:: insert_cell
 .. autofunction:: set_cell_source
+.. autofunction:: set_cell_metadata
+.. autofunction:: set_notebook_metadata
+.. autofunction:: metadata_choices
 .. autofunction:: move_cell
 .. autofunction:: delete_cell
 .. autofunction:: undo_last_change

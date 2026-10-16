@@ -670,6 +670,44 @@ def test_undo_reverts_an_agent_edit_in_the_live_notebook(nbclassic_port):
     asyncio.run(scenario())
 
 
+def test_set_metadata_reaches_the_saved_form_and_undoes(nbclassic_port):
+    async def scenario():
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch()
+            page = await browser.new_page()
+            mcp = await McpPeer.connect(nbclassic_port)
+            try:
+                await page.goto(f"http://localhost:{nbclassic_port}/notebooks/{NOTEBOOK}?token={TOKEN}")
+                await mcp.recv_until(_extension_joined)
+                cell_id = (await mcp.command("snapshot", {}))[0]["cell_id"]
+                saved_metadata = "(id) => Jupyter.notebook.toJSON().cells.find(c => c.id === id).metadata"
+                original = await page.evaluate(saved_metadata, cell_id)
+
+                patch = {"slideshow": {"slide_type": "fragment"}, "tags": ["hide-input"]}
+                await mcp.command("set_metadata", {"cell_id": cell_id, "patch": patch})
+                # toJSON is what a save writes, so this is the metadata the file would get.
+                written = await page.evaluate(saved_metadata, cell_id)
+                assert written["slideshow"] == {"slide_type": "fragment"}
+                assert written["tags"] == ["hide-input"]
+                assert await page.evaluate("Jupyter.notebook.dirty")
+
+                undone = await mcp.command("undo_last", {})
+                assert undone["status"] == "undone"
+                assert await page.evaluate(saved_metadata, cell_id) == original
+
+                notebook_metadata = "() => Jupyter.notebook.toJSON().metadata"
+                before = await page.evaluate(notebook_metadata)
+                await mcp.command("set_notebook_metadata", {"patch": {"rise": {"theme": "night"}}})
+                assert (await page.evaluate(notebook_metadata))["rise"] == {"theme": "night"}
+                assert (await mcp.command("undo_last", {}))["status"] == "undone"
+                assert await page.evaluate(notebook_metadata) == before
+            finally:
+                mcp.close()
+                await browser.close()
+
+    asyncio.run(scenario())
+
+
 def test_presence_ui_reflects_state_and_pause_blocks_commands(nbclassic_port):
     async def scenario():
         async with async_playwright() as pw:
