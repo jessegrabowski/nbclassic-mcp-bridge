@@ -11,6 +11,7 @@ from typing import Literal, TypedDict
 from mcp.server.fastmcp import FastMCP, Image
 
 from nbclassic_mcp_bridge_mcp import discovery
+from nbclassic_mcp_bridge_mcp.metadata import CATALOG, validate_patch
 from nbclassic_mcp_bridge_mcp.registry import Attachment, NotebookRegistry
 from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
 
@@ -545,12 +546,29 @@ async def set_cell_metadata(cell_id: str, patch: dict, notebook: str | None = No
 
     Nested objects merge key by key, a ``null`` value deletes that key, and any other value (lists
     included) replaces what was there, so changing ``tags`` means sending the whole new list. Keys
-    the patch does not name are left alone. Returns ``{"cell_id": ..., "metadata": ...}`` with the
-    cell's full metadata after the change. Undoable with ``undo_last_change``. Act on the current
-    notebook unless ``notebook`` names another attached one.
+    the patch does not name are left alone. Keys listed by ``metadata_choices`` (such as
+    ``{"slideshow": {"slide_type": "fragment"}}`` for RISE) are checked against their valid values
+    before anything is written, and other keys pass through. Returns
+    ``{"cell_id": ..., "metadata": ...}`` with the cell's full metadata after the change. Undoable
+    with ``undo_last_change``. Act on the current notebook unless ``notebook`` names another
+    attached one.
     """
+    validate_patch(patch, scope="cell")
     client, target = _target(notebook)
     return _echo(await client.command("set_metadata", {"cell_id": cell_id, "patch": patch}), target)
+
+
+@mcp.tool()
+async def metadata_choices() -> dict:
+    """List the cell and notebook metadata keys that nbclassic, RISE, and the LaTeX export act on.
+
+    Keys are dotted paths into the metadata (``slideshow.slide_type`` is
+    ``{"slideshow": {"slide_type": ...}}``). Each entry gives the value's type, ``choices`` when
+    only certain values are accepted (with what each one does), ``suggested`` values when others
+    are allowed too, the programs that read the key, and what they do with it. Any other key is
+    stored but ignored by these programs.
+    """
+    return CATALOG
 
 
 @mcp.tool()

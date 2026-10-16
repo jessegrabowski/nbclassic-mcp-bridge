@@ -662,6 +662,7 @@ ATTACHMENT_TOOLS = {
     "detach_notebook",
     "poll_events",
     "create_notebook",
+    "metadata_choices",
 }
 
 
@@ -1071,3 +1072,14 @@ def test_restore_without_a_checkpoint_gives_an_actionable_error(monkeypatch):
     with pytest.raises(RuntimeError, match="checkpoint_notebook first"):
         asyncio.run(server.restore_notebook_checkpoint())
 
+
+def test_invalid_metadata_is_rejected_before_anything_is_sent(monkeypatch):
+    server, registry = _with_registry(monkeypatch, {DEFAULT_URL: [_record("nb/a.ipynb")]})
+
+    async def scenario():
+        await registry.attach("nb/a.ipynb")
+        await server.set_cell_metadata(cell_id="c1", patch={"slideshow": {"slide_type": "Slide"}})
+
+    with pytest.raises(ValueError, match="slide_type"):
+        asyncio.run(scenario())
+    assert _clients_by_path(registry)["nb/a.ipynb"].commands == []
