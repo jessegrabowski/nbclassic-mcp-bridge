@@ -684,6 +684,7 @@ ECHOING_TOOLS = [
     ("insert_cell", {"index": 0, "cell_type": "code", "source": "x"}),
     ("set_cell_source", {"cell_id": "c1", "source": "x"}),
     ("set_cell_metadata", {"cell_id": "c1", "patch": {"tags": ["x"]}}),
+    ("set_notebook_metadata", {"patch": {"rise": {"theme": "night"}}}),
     ("delete_cell", {"cell_id": "c1"}),
     ("move_cell", {"cell_id": "c1", "index": 1}),
     ("execute_cell", {"cell_id": "c1"}),

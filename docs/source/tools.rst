@@ -37,6 +37,7 @@ Editing
 .. autofunction:: insert_cell
 .. autofunction:: set_cell_source
 .. autofunction:: set_cell_metadata
+.. autofunction:: set_notebook_metadata
 .. autofunction:: metadata_choices
 .. autofunction:: move_cell
 .. autofunction:: delete_cell

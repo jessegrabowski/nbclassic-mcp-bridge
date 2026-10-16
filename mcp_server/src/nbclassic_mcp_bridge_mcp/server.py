@@ -559,6 +559,22 @@ async def set_cell_metadata(cell_id: str, patch: dict, notebook: str | None = No
 
 
 @mcp.tool()
+async def set_notebook_metadata(patch: dict, notebook: str | None = None) -> dict:
+    """Change the notebook's own metadata by applying ``patch`` as a JSON merge patch (RFC 7386).
+
+    Merges like ``set_cell_metadata`` and is validated against the notebook keys that
+    ``metadata_choices`` lists. RISE settings go under ``rise`` and apply the next time the
+    slideshow opens. ``title``, ``authors``, and ``date`` feed the LaTeX export. Avoid
+    ``kernelspec`` and ``language_info``, which Jupyter maintains. Returns ``{"metadata": ...}``
+    with the full notebook metadata after the change. Undoable with ``undo_last_change``. Act on
+    the current notebook unless ``notebook`` names another attached one.
+    """
+    validate_patch(patch, scope="notebook")
+    client, target = _target(notebook)
+    return _echo(await client.command("set_notebook_metadata", {"patch": patch}), target)
+
+
+@mcp.tool()
 async def metadata_choices() -> dict:
     """List the cell and notebook metadata keys that nbclassic, RISE, and the LaTeX export act on.
 
@@ -682,10 +698,11 @@ async def move_cell(cell_id: str, index: int, notebook: str | None = None) -> di
 async def undo_last_change(notebook: str | None = None) -> dict:
     """Undo your most recent notebook mutation (source, metadata, insert, delete, move; not executions).
 
-    An entry is skipped rather than applied when the human has touched that cell since, so undo can
-    never destroy human work; skipped or not, the entry is consumed. Returns what was undone or why
-    it was skipped. The undo stack is per notebook. Act on the current notebook unless ``notebook``
-    names another attached one.
+    An entry is skipped rather than applied when the human has touched that cell (or, for a
+    notebook metadata change, the notebook metadata) since, so undo can never destroy human work;
+    skipped or not, the entry is consumed. Returns what was undone or why it was skipped. The undo
+    stack is per notebook. Act on the current notebook unless ``notebook`` names another attached
+    one.
     """
     client, target = _target(notebook)
     return _echo(await client.command("undo_last", {}), target)

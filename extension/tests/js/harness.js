@@ -184,6 +184,7 @@ function makeNotebook(events, cells) {
             },
             execute() {},
         },
+        metadata: {},
         dirty: false,
         get_cells() {
             return this.cells;

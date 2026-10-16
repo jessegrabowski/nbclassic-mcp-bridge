@@ -116,6 +116,15 @@ define([
         Jupyter.notebook.set_dirty(true);
     }
 
+    // Notebook.metadata is a plain property with no setter to hook, so the contents are swapped in
+    // place: anything already holding the object sees the change.
+    function writeAgentNotebookMetadata(metadata) {
+        var current = Jupyter.notebook.metadata;
+        Object.keys(current).forEach(function (key) { delete current[key]; });
+        Object.assign(current, metadata);
+        Jupyter.notebook.set_dirty(true);
+    }
+
     function asText(value) {
         return Array.isArray(value) ? value.join("") : String(value == null ? "" : value);
     }
@@ -143,7 +152,7 @@ define([
             return { status: "nothing to undo" };
         }
         var nb = Jupyter.notebook;
-        var described = entry.op + " on " + (entry.cell_id || "cell");
+        var described = entry.op + " on " + (entry.cell_id || entry.subject || "cell");
         if (entry.op === "set_source") {
             var edited = cellById(entry.cell_id);
             if (!edited) {
@@ -166,6 +175,13 @@ define([
             }
             writeAgentMetadata(annotated, JSON.parse(entry.before));
             markTouched(annotated);
+            return { status: "undone", undid: described };
+        }
+        if (entry.op === "set_notebook_metadata") {
+            if (JSON.stringify(nb.metadata) !== entry.after) {
+                return { status: "skipped", reason: "metadata changed since", undid: described };
+            }
+            writeAgentNotebookMetadata(JSON.parse(entry.before));
             return { status: "undone", undid: described };
         }
         if (entry.op === "insert_cell") {
@@ -342,6 +358,15 @@ define([
             writeAgentMetadata(annotated, merged);
             markTouched(annotated);
             return { cell_id: args.cell_id, metadata: merged };
+        },
+        set_notebook_metadata: function (args) {
+            if (!isPlainObject(args.patch)) { throw new Error("set_notebook_metadata needs a patch object"); }
+            var current = Jupyter.notebook.metadata;
+            var merged = mergePatch(current, args.patch);
+            recordUndo({ op: "set_notebook_metadata", subject: "notebook",
+                         before: JSON.stringify(current), after: JSON.stringify(merged) });
+            writeAgentNotebookMetadata(merged);
+            return { metadata: merged };
         },
         delete_cell: function (args) {
             var deleteIndex = indexById(args.cell_id);

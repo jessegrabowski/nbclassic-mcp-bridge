@@ -30,7 +30,7 @@ test("hello carries the protocol version, notebook path, and capabilities", () =
     assert.equal(hello.notebook, "fake.ipynb");
     // The op table is the capability list, so an MCP server talking to an older tab sees an op
     // missing and reports that rather than sending a command nothing will answer.
-    for (const op of ["snapshot", "set_source", "set_metadata", "execute_cell", "inspect",
+    for (const op of ["snapshot", "set_source", "set_metadata", "set_notebook_metadata", "execute_cell", "inspect",
                       "undo_last", "reload_notebook", "open_notebook", "restart_kernel"]) {
         assert.ok(hello.capabilities.includes(op), `capabilities must include ${op}`);
     }
@@ -120,6 +120,37 @@ test("undo restores metadata unless it changed since", () => {
     socket.receive({ kind: "cmd", id: 4, op: "undo_last", args: {} });
     assert.match(lastReply(socket, 4).result.reason, /metadata changed since/);
     assert.deepEqual(bridge.cells[1].metadata, { a: 2 });
+});
+
+test("set_notebook_metadata merges into the notebook's own metadata object, undoably", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+    const held = { kernelspec: { name: "python3" }, rise: { theme: "simple", scroll: true } };
+    bridge.notebook.metadata = held;
+
+    const patch = { rise: { theme: "night", scroll: null }, title: "Deck" };
+    socket.receive({ kind: "cmd", id: 1, op: "set_notebook_metadata", args: { patch } });
+    const expected = { kernelspec: { name: "python3" }, rise: { theme: "night" }, title: "Deck" };
+    assert.deepEqual(lastReply(socket, 1).result, { metadata: expected });
+    assert.equal(bridge.notebook.metadata, held, "the object others hold must stay the live one");
+    assert.deepEqual(held, expected);
+    assert.equal(bridge.notebook.dirty, true);
+
+    socket.receive({ kind: "cmd", id: 2, op: "undo_last", args: {} });
+    assert.deepEqual(lastReply(socket, 2).result, { status: "undone", undid: "set_notebook_metadata on notebook" });
+    assert.deepEqual(held, { kernelspec: { name: "python3" }, rise: { theme: "simple", scroll: true } });
+});
+
+test("undo leaves notebook metadata alone once it changed since", () => {
+    const bridge = loadBridge();
+    const socket = connect(bridge);
+
+    socket.receive({ kind: "cmd", id: 1, op: "set_notebook_metadata", args: { patch: { title: "Agent" } } });
+    bridge.notebook.metadata.kernelspec = { name: "python3" }; // e.g. a kernel start writing its spec
+
+    socket.receive({ kind: "cmd", id: 2, op: "undo_last", args: {} });
+    assert.match(lastReply(socket, 2).result.reason, /metadata changed since/);
+    assert.deepEqual(bridge.notebook.metadata, { title: "Agent", kernelspec: { name: "python3" } });
 });
 
 test("agent mutations emit no events; human ones do", (t) => {

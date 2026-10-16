@@ -695,6 +695,12 @@ def test_set_metadata_reaches_the_saved_form_and_undoes(nbclassic_port):
                 assert undone["status"] == "undone"
                 assert await page.evaluate(saved_metadata, cell_id) == original
 
+                notebook_metadata = "() => Jupyter.notebook.toJSON().metadata"
+                before = await page.evaluate(notebook_metadata)
+                await mcp.command("set_notebook_metadata", {"patch": {"rise": {"theme": "night"}}})
+                assert (await page.evaluate(notebook_metadata))["rise"] == {"theme": "night"}
+                assert (await mcp.command("undo_last", {}))["status"] == "undone"
+                assert await page.evaluate(notebook_metadata) == before
             finally:
                 mcp.close()
                 await browser.close()

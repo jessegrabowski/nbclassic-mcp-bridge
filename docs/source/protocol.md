@@ -52,6 +52,7 @@ focus, so the tab the human is actually using holds the bridge.
 | `insert_cell`  | `{index, cell_type, source}`                  | the created cell (`{cell_id, index}`) |
 | `set_source`   | `{cell_id, source}`                           | `{cell_id, status: "written"}` — or `{cell_id, status: "skipped", reason: "focused"}` if the human has that cell focused |
 | `set_metadata` | `{cell_id, patch}`                            | `{cell_id, metadata}` — applies `patch` as an RFC 7386 JSON merge patch and returns the cell's full metadata afterwards. It is never skipped for focus, since it cannot clobber an in-progress source edit |
+| `set_notebook_metadata` | `{patch}`                            | `{metadata}` — the same merge patch, applied to the notebook-level metadata |
 | `delete_cell`  | `{cell_id}`                                   | `{cell_id}` |
 | `move_cell`    | `{cell_id, index}`                            | `{cell_id, index}` |
 | `execute_cell` | `{cell_id, timeout_ms?}`                      | `{cell_id, outputs}` |
