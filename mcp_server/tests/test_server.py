@@ -713,6 +713,7 @@ READING_TOOLS = [
     ("read_notebook", {}),
     ("read_cell_source", {"cell_id": "c1"}),
     ("read_cell_output", {"cell_id": "c1"}),
+    ("slide_outline", {}),
     ("inspect_kernel", {"code": "x"}),
     ("kernel_status", {}),
 ]

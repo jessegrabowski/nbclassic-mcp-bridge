@@ -12,6 +12,9 @@ _SLIDE_TYPES = {
     "skip": "leave out of the slideshow",
 }
 
+# Roles that make RISE treat a notebook as prepared for slides; see outline_slides.
+_SLIDE_ROLES = set(_SLIDE_TYPES) - {"-"}
+
 _REVEAL_THEMES = [
     "beige",
     "black",
@@ -55,7 +58,8 @@ CATALOG = {
             "description": (
                 "The cell's place in the slideshow. Leaving it unset acts like '-', except in a "
                 "notebook where no cell has a slide role (slide, subslide, fragment, notes, "
-                "skip): there every unset cell starts its own slide."
+                "skip): there every unset cell starts its own slide. Call slide_outline to see "
+                "the resulting layout."
             ),
         },
         "tags": {
@@ -220,3 +224,72 @@ def validate_patch(patch: dict, scope: str) -> None:
     ]
     if problems:
         raise ValueError("; ".join(problems) + " (see metadata_choices)")
+
+
+def _raw_slide_type(cell: dict) -> object:
+    slideshow = (cell.get("metadata") or {}).get("slideshow")
+    return slideshow.get("slide_type") if isinstance(slideshow, dict) else None
+
+
+def _applied_slide_type(cell: dict, prepared: bool) -> object:
+    raw = _raw_slide_type(cell)
+    if raw is None:
+        return "-" if prepared else "slide"
+    return "-" if raw in ("", "-") else raw
+
+
+def _preview(source: str, limit: int = 60) -> str:
+    first_line = next((line.strip() for line in source.splitlines() if line.strip()), "")
+    return first_line if len(first_line) <= limit else first_line[: limit - 3] + "..."
+
+
+def outline_slides(cells: list[dict]) -> list[dict]:
+    """Place each cell in the slideshow the way RISE's markupSlides does.
+
+    ``slide`` counts across, ``subslide`` counts down within a slide, and ``fragment`` counts the
+    reveal steps within a subslide, all from 0. Fragment 0 is shown as soon as the subslide is.
+    Slide, subslide, and fragment markers are ignored until a cell that is neither notes nor skip
+    has been placed, so a deck opening on a marked cell does not start with an empty slide.
+
+    Parameters
+    ----------
+    cells : list of dict
+        Cells as the extension's snapshot returns them, with ``metadata`` and ``source``.
+
+    Returns
+    -------
+    outline : list of dict
+        One ``{cell_id, index, cell_type, slide_type, slide, subslide, fragment, preview}`` per
+        cell, in notebook order. ``slide_type`` is the role RISE applied, with unset resolved.
+    """
+    # RISE resolves an unset slide_type per entry: it continues the current slide, unless no cell
+    # in the notebook has a role at all, in which case each unset cell starts a slide. An explicit
+    # '-' or '' always continues.
+    prepared = any(_raw_slide_type(cell) in _SLIDE_ROLES for cell in cells)
+    slide = subslide = fragment = 0
+    content_placed = False
+    outline = []
+    for cell in cells:
+        slide_type = _applied_slide_type(cell, prepared=prepared)
+        if content_placed:
+            if slide_type == "slide":
+                slide, subslide, fragment = slide + 1, 0, 0
+            elif slide_type == "subslide":
+                subslide, fragment = subslide + 1, 0
+            elif slide_type == "fragment":
+                fragment += 1
+        elif slide_type not in ("notes", "skip"):
+            content_placed = True
+        outline.append(
+            {
+                "cell_id": cell.get("cell_id"),
+                "index": cell.get("index"),
+                "cell_type": cell.get("cell_type"),
+                "slide_type": slide_type,
+                "slide": slide,
+                "subslide": subslide,
+                "fragment": fragment,
+                "preview": _preview(str(cell.get("source", ""))),
+            }
+        )
+    return outline

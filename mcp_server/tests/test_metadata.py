@@ -1,6 +1,65 @@
 import pytest
 
-from nbclassic_mcp_bridge_mcp.metadata import _TYPE_CHECKS, CATALOG, validate_patch
+from nbclassic_mcp_bridge_mcp.metadata import _TYPE_CHECKS, CATALOG, outline_slides, validate_patch
+
+
+def _cells(*slide_types):
+    cells = []
+    for index, slide_type in enumerate(slide_types):
+        metadata = {} if slide_type is None else {"slideshow": {"slide_type": slide_type}}
+        cells.append({"cell_id": f"c{index}", "index": index, "source": f"cell {index}", "metadata": metadata})
+    return cells
+
+
+def _positions(outline):
+    return [(cell["slide"], cell["subslide"], cell["fragment"]) for cell in outline]
+
+
+def test_outline_counts_slides_across_subslides_down_and_fragments_within():
+    outline = outline_slides(_cells("slide", "-", "fragment", "subslide", "fragment", "fragment", "slide", "-"))
+    assert _positions(outline) == [
+        (0, 0, 0),
+        (0, 0, 0),
+        (0, 0, 1),
+        (0, 1, 0),
+        (0, 1, 1),
+        (0, 1, 2),
+        (1, 0, 0),
+        (1, 0, 0),
+    ]
+
+
+def test_outline_ignores_markers_until_visible_content_is_placed():
+    # Notes place nothing visible, so the subslide marker after them would open onto an empty
+    # opening slide and is ignored; that cell is the first content, so later markers count.
+    outline = outline_slides(_cells("notes", "subslide", "fragment", "slide"))
+    assert _positions(outline) == [(0, 0, 0), (0, 0, 0), (0, 0, 1), (1, 0, 0)]
+
+
+def test_unset_cells_continue_in_a_prepared_notebook_and_start_slides_otherwise():
+    prepared = outline_slides(_cells("slide", None, "-"))
+    assert [cell["slide_type"] for cell in prepared] == ["slide", "-", "-"]
+    assert _positions(prepared) == [(0, 0, 0)] * 3
+
+    unprepared = outline_slides(_cells(None, None, "-"))
+    assert [cell["slide_type"] for cell in unprepared] == ["slide", "slide", "-"]
+    assert _positions(unprepared) == [(0, 0, 0), (1, 0, 0), (1, 0, 0)]
+
+
+def test_notes_and_skip_cells_keep_the_position_of_the_cell_before_them():
+    outline = outline_slides(_cells("slide", "fragment", "notes", "skip", "-", "subslide", "skip"))
+    assert _positions(outline) == [(0, 0, 0), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 1, 0), (0, 1, 0)]
+
+
+def test_outline_previews_the_first_nonblank_line_and_shortens_long_ones():
+    short, long = outline_slides(
+        [
+            {"cell_id": "c0", "index": 0, "source": "\n  # Title  \nbody", "metadata": {}},
+            {"cell_id": "c1", "index": 1, "source": "x" * 100, "metadata": {}},
+        ]
+    )
+    assert short["preview"] == "# Title"
+    assert long["preview"] == "x" * 57 + "..."
 
 
 @pytest.mark.parametrize(

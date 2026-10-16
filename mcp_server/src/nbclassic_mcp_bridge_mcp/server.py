@@ -11,7 +11,7 @@ from typing import Literal, TypedDict
 from mcp.server.fastmcp import FastMCP, Image
 
 from nbclassic_mcp_bridge_mcp import discovery
-from nbclassic_mcp_bridge_mcp.metadata import CATALOG, validate_patch
+from nbclassic_mcp_bridge_mcp.metadata import CATALOG, outline_slides, validate_patch
 from nbclassic_mcp_bridge_mcp.registry import Attachment, NotebookRegistry
 from nbclassic_mcp_bridge_mcp.relay_client import RelayClient
 
@@ -585,6 +585,21 @@ async def metadata_choices() -> dict:
     stored but ignored by these programs.
     """
     return CATALOG
+
+
+@mcp.tool()
+async def slide_outline(notebook: str | None = None) -> list[dict]:
+    """Show where each cell lands in the RISE slideshow, without opening it.
+
+    Each cell gets ``slide`` (counting across), ``subslide`` (counting down within a slide), and
+    ``fragment`` (reveal steps within a subslide, where 0 shows with the subslide), all from 0, plus
+    the ``slide_type`` RISE applies and a one-line ``preview`` of the source. Notes and skip cells
+    keep the position of the cell before them. Use it after changing slide types to check the deck
+    has the intended shape. Act on the current notebook unless ``notebook`` names another attached
+    one.
+    """
+    client, _ = _resolve(notebook)
+    return outline_slides(await client.command("snapshot", {"outputs": "summary"}))
 
 
 @mcp.tool()

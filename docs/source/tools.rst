@@ -30,6 +30,7 @@ Reading
 .. autofunction:: read_cell_source
 .. autofunction:: read_cell_output
 .. autofunction:: read_cell_image
+.. autofunction:: slide_outline
 
 Editing
 -------
